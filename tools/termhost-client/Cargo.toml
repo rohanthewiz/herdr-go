@@ -1,0 +1,28 @@
+# Isolated client for the Phase B Go↔Rust orchestration seam.
+#
+# This package is deliberately NOT part of the herdr crate: it has its own
+# (empty) [workspace] table so cargo treats it as a standalone workspace root and
+# never pulls in herdr's build.rs / libghostty-vt (zig) build. It only speaks the
+# orchestration protocol to the Go `termhost` daemon over a Unix socket.
+[package]
+name = "termhost-client"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "termhost_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "termhost-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Standalone workspace root so this never joins the herdr crate's build.
+[workspace]
