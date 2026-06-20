@@ -11,6 +11,12 @@ keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
 include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
+[features]
+# Phase B: build the Go↔Rust terminal-backend seam (src/termhost). Experimental;
+# off by default so the standard build is unaffected. Reuses existing deps
+# (serde/serde_json/base64), so enabling it pulls in no new crates.
+termhost = []
+
 [dependencies]
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }

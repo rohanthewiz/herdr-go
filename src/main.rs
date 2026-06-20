@@ -78,6 +78,8 @@ mod sound;
 mod terminal;
 mod terminal_notify;
 mod terminal_theme;
+#[cfg(feature = "termhost")]
+mod termhost;
 mod ui;
 mod update;
 mod workspace;
