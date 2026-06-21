@@ -388,6 +388,93 @@ fn probe_foreground_process(pid: u32, foreground_pgid: Option<u32>) -> ProcessPr
 }
 
 #[cfg(unix)]
+/// Renders a termhost pane's accumulated grid into a ratatui frame, mirroring
+/// the conversion `GhosttyPaneTerminal::render` performs but from wire cells.
+#[cfg(feature = "termhost")]
+fn render_termhost_frame(
+    frame: &mut Frame,
+    area: Rect,
+    show_cursor: bool,
+    pane: &crate::termhost::TermhostPane,
+) {
+    let Some(snapshot) = pane.snapshot() else {
+        return;
+    };
+    let width = snapshot.width as usize;
+    {
+        let buf = frame.buffer_mut();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let cell = &mut buf[(area.x + x, area.y + y)];
+                cell.reset();
+                if x < snapshot.width && y < snapshot.height {
+                    if let Some(data) = snapshot.cells.get((y as usize) * width + (x as usize)) {
+                        cell.set_symbol(&data.symbol);
+                        cell.fg = crate::protocol::u32_to_color(data.fg);
+                        cell.bg = crate::protocol::u32_to_color(data.bg);
+                        cell.modifier = crate::protocol::u16_to_modifier(data.modifier);
+                    }
+                }
+            }
+        }
+    }
+    if show_cursor {
+        if let Some(cursor) = pane.cursor() {
+            if cursor.visible && cursor.x < area.width && cursor.y < area.height {
+                frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
+            }
+        }
+    }
+}
+
+/// Builds a dirty patch from a termhost pane's snapshot when it has changed since
+/// the last collect. Rows are sized exactly to `area_width` (the compositor
+/// splices whole rows), padding/truncating against the backend grid as needed.
+#[cfg(feature = "termhost")]
+fn termhost_dirty_patch(
+    pane: &crate::termhost::TermhostPane,
+    area_width: u16,
+    area_height: u16,
+) -> TerminalDirtyPatchOutcome {
+    if !pane.take_dirty() {
+        return TerminalDirtyPatchOutcome::Clean;
+    }
+    let Some(snapshot) = pane.snapshot() else {
+        return TerminalDirtyPatchOutcome::Clean;
+    };
+    let width = snapshot.width as usize;
+    let mut rows = Vec::with_capacity(area_height as usize);
+    for y in 0..area_height {
+        let mut row = Vec::with_capacity(area_width as usize);
+        for x in 0..area_width {
+            let cell = if x < snapshot.width && y < snapshot.height {
+                snapshot
+                    .cells
+                    .get((y as usize) * width + (x as usize))
+                    .cloned()
+                    .unwrap_or_else(termhost_blank_cell)
+            } else {
+                termhost_blank_cell()
+            };
+            row.push(cell);
+        }
+        rows.push((y, row));
+    }
+    TerminalDirtyPatchOutcome::Patch(TerminalDirtyPatch { rows })
+}
+
+#[cfg(feature = "termhost")]
+fn termhost_blank_cell() -> crate::protocol::CellData {
+    crate::protocol::CellData {
+        symbol: " ".to_string(),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        skip: false,
+        hyperlink: None,
+    }
+}
+
 fn spawn_basic_detection_task(
     pane_id: PaneId,
     child_pid: Arc<AtomicU32>,
@@ -776,6 +863,8 @@ pub struct PaneRuntime {
 
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
+    #[cfg(feature = "termhost")]
+    Termhost(Arc<crate::termhost::TermhostPane>),
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
@@ -784,9 +873,23 @@ enum PaneRuntimeIo {
 }
 
 impl PaneRuntimeIo {
+    /// The Go-backend pane handle, when this runtime is backed by termhost.
+    #[cfg(feature = "termhost")]
+    fn termhost_pane(&self) -> Option<&Arc<crate::termhost::TermhostPane>> {
+        match self {
+            PaneRuntimeIo::Termhost(pane) => Some(pane),
+            _ => None,
+        }
+    }
+
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(pane) => {
+                use crate::termhost::TerminalBackend;
+                pane.close();
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -796,6 +899,10 @@ impl PaneRuntimeIo {
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => {
+                Err(std::io::Error::other("termhost backend has no PTY master fd"))
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
@@ -807,6 +914,8 @@ impl PaneRuntimeIo {
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => None,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
         }
@@ -816,6 +925,9 @@ impl PaneRuntimeIo {
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            // Handoff is a local-PTY feature; termhost panes are not handed off.
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -831,6 +943,8 @@ impl PaneRuntimeIo {
                     actor.rollback_handoff()
                 }
             }
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -840,6 +954,8 @@ impl PaneRuntimeIo {
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -863,6 +979,14 @@ impl PaneRuntimeIo {
                     terminal_responses,
                 );
             }
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(pane) => {
+                use crate::termhost::TerminalBackend;
+                // Go owns the PTY + emulator, so query responses are handled there;
+                // the Rust-side `terminal_responses` for a termhost pane are empty.
+                let _ = &terminal_responses;
+                pane.resize(rows, cols, cell_width_px, cell_height_px);
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
@@ -882,6 +1006,8 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(_) => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -890,6 +1016,12 @@ impl PaneRuntimeIo {
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(pane) => {
+                use crate::termhost::TerminalBackend;
+                pane.write_input(&bytes);
+                Ok(())
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
         }
@@ -898,6 +1030,12 @@ impl PaneRuntimeIo {
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            #[cfg(feature = "termhost")]
+            PaneRuntimeIo::Termhost(pane) => {
+                use crate::termhost::TerminalBackend;
+                pane.write_input(&bytes);
+                Ok(())
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -1641,6 +1779,22 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
 
+        // When the termhost backend is enabled, the PTY + VT emulation live in the
+        // Go daemon; spawn the pane there instead of an in-process PTY.
+        #[cfg(feature = "termhost")]
+        if let Some(client) = crate::termhost::client_if_enabled() {
+            return Self::finish_termhost(
+                pane_id,
+                rows,
+                cols,
+                terminal,
+                kitty_keyboard_flags,
+                cmd,
+                client,
+                events,
+            );
+        }
+
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
 
@@ -2115,6 +2269,109 @@ impl PaneRuntime {
         })
     }
 
+    /// Builds a [`PaneRuntime`] backed by the Go `termhost` daemon instead of an
+    /// in-process PTY + ghostty emulator. The local [`PaneTerminal`] is kept but
+    /// unfed (emulator-derived queries return empty); display, input, resize, and
+    /// exit flow through the Go backend. Richer features (detection text,
+    /// selection, scrollback, hyperlinks) await the Go→Rust passthrough events.
+    #[cfg(feature = "termhost")]
+    #[allow(clippy::too_many_arguments)]
+    fn finish_termhost(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        terminal: Arc<PaneTerminal>,
+        kitty_keyboard_flags: Arc<AtomicU16>,
+        cmd: CommandBuilder,
+        client: Arc<crate::termhost::TermhostClient>,
+        events: mpsc::Sender<AppEvent>,
+    ) -> std::io::Result<Self> {
+        use crate::termhost::{PaneSpec, TerminalBackend};
+
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let (command, args) = match argv.split_first() {
+            Some((first, rest)) => (first.clone(), rest.to_vec()),
+            None => (String::new(), Vec::new()),
+        };
+        let cwd = cmd
+            .get_cwd()
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let env: std::collections::BTreeMap<String, String> = cmd
+            .iter_extra_env_as_str()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+
+        let pane = client
+            .create_pane(PaneSpec {
+                pane_id: pane_id.raw(),
+                cols,
+                rows,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                cwd,
+                command,
+                args,
+                env,
+            })
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let pane = Arc::new(pane);
+
+        // Exit watcher: the client's reader thread records the exit code from the
+        // Go `pane_exited` event; surface it as PaneDied like the in-process child
+        // watcher does.
+        {
+            let pane = pane.clone();
+            let events = events.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Some(code) = pane.exit_status() {
+                        crate::logging::pane_exited(pane_id.raw(), &format!("exit_code={code}"));
+                        if let Err(err) = events.send(AppEvent::PaneDied { pane_id }).await {
+                            error!(pane = pane_id.raw(), err = %err, "failed to send PaneDied event");
+                        }
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            });
+        }
+
+        let child_pid = Arc::new(AtomicU32::new(0));
+        let reported_cwd = Arc::new(Mutex::new(None));
+        let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
+        let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
+            pane_id,
+            child_pid.clone(),
+            terminal.clone(),
+            detection_content_seq.clone(),
+            full_lifecycle_authority_active.clone(),
+            events,
+        );
+
+        Ok(Self {
+            pane_id,
+            terminal,
+            io: PaneRuntimeIo::Termhost(pane),
+            current_size: Cell::new((rows, cols, 0, 0)),
+            child_pid,
+            reported_cwd,
+            child_wait_completed: None,
+            kitty_keyboard_flags,
+            detection_content_seq,
+            full_lifecycle_authority_active,
+            detect_reset_notify,
+            pending_release,
+            preserve_processes_on_drop: false,
+            detect_handle,
+        })
+    }
+
     pub fn begin_graceful_release(&self, agent: Agent) {
         if let Ok(mut pending_release) = self.pending_release.lock() {
             *pending_release = Some(PendingAgentRelease {
@@ -2209,6 +2466,19 @@ impl PaneRuntime {
         if !show_cursor {
             return None;
         }
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            let cursor = pane.cursor()?;
+            if cursor.x >= area.width || cursor.y >= area.height {
+                return None;
+            }
+            return Some(TerminalCursorState {
+                x: area.x + cursor.x,
+                y: area.y + cursor.y,
+                visible: cursor.visible,
+                shape: cursor.shape,
+            });
+        }
         let cursor = self.terminal.cursor_state()?;
         if cursor.x >= area.width || cursor.y >= area.height {
             return None;
@@ -2271,6 +2541,11 @@ impl PaneRuntime {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            render_termhost_frame(frame, area, show_cursor, pane);
+            return;
+        }
         self.terminal.render(frame, area, show_cursor);
     }
 
@@ -2279,6 +2554,10 @@ impl PaneRuntime {
         area_width: u16,
         area_height: u16,
     ) -> TerminalDirtyPatchOutcome {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            return termhost_dirty_patch(pane, area_width, area_height);
+        }
         self.terminal.collect_dirty_patch(area_width, area_height)
     }
 

@@ -14,10 +14,76 @@ use crate::protocol as wire;
 use super::proto::{self, Command, Event};
 use super::TerminalBackend;
 
-/// Shared, reader-thread-updated state for one pane.
+/// Shared, reader-thread-updated state for one pane. The reader thread folds Go
+/// frames into a full accumulated grid; the render path reads snapshots of it.
 struct PaneState {
-    latest: Mutex<Option<wire::FrameData>>,
+    grid: Mutex<PaneGrid>,
     exit: Mutex<Option<i32>>,
+}
+
+/// Accumulated full grid for one pane. Go sends the full grid each frame with
+/// `skip` marking unchanged cells (and `full` set on a complete redraw); we fold
+/// those in so a snapshot is always a complete grid the compositor can splice.
+#[derive(Default)]
+struct PaneGrid {
+    cols: u16,
+    rows: u16,
+    cells: Vec<wire::CellData>,
+    cursor: Option<wire::CursorState>,
+    /// Set when a frame changed the grid; cleared by the render path.
+    dirty: bool,
+    /// True once at least one frame has been folded in.
+    has_frame: bool,
+}
+
+impl PaneGrid {
+    /// Folds one incoming frame into the accumulated grid.
+    fn apply(&mut self, frame: proto::Frame) {
+        let n = frame.cols as usize * frame.rows as usize;
+        if self.cols != frame.cols || self.rows != frame.rows || self.cells.len() != n {
+            // First frame or a resize: start from a blank grid of the new size.
+            self.cells = vec![blank_cell(); n];
+            self.cols = frame.cols;
+            self.rows = frame.rows;
+        }
+        for (i, cell) in frame.cells.into_iter().enumerate() {
+            if i >= n {
+                break;
+            }
+            // `skip` means "unchanged, keep the prior cell"; full frames never skip.
+            if !cell.skip {
+                self.cells[i] = cell;
+            }
+        }
+        self.cursor = frame.cursor;
+        self.dirty = true;
+        self.has_frame = true;
+    }
+
+    fn snapshot(&self) -> Option<wire::FrameData> {
+        if !self.has_frame {
+            return None;
+        }
+        Some(wire::FrameData {
+            cells: self.cells.clone(),
+            width: self.cols,
+            height: self.rows,
+            cursor: self.cursor.clone(),
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        })
+    }
+}
+
+fn blank_cell() -> wire::CellData {
+    wire::CellData {
+        symbol: " ".to_string(),
+        fg: 0,
+        bg: 0,
+        modifier: 0,
+        skip: false,
+        hyperlink: None,
+    }
 }
 
 /// A connection to the Go terminal backend. Owns the send side and a background
@@ -56,7 +122,7 @@ impl TermhostClient {
         match proto::read_event(&mut reader)? {
             Event::Welcome { error, .. } if error.is_empty() => {}
             Event::Welcome { error, .. } => {
-                return Err(io::Error::new(io::ErrorKind::Other, format!("welcome error: {error}")))
+                return Err(io::Error::other(format!("welcome error: {error}")))
             }
             other => {
                 return Err(io::Error::new(
@@ -74,14 +140,12 @@ impl TermhostClient {
         let weak = Arc::downgrade(&client);
         thread::Builder::new()
             .name("termhost-reader".into())
-            .spawn(move || loop {
-                let ev = match proto::read_event(&mut reader) {
-                    Ok(ev) => ev,
-                    Err(_) => break, // connection closed
-                };
-                // Stop if the client has been dropped.
-                let Some(client) = weak.upgrade() else { break };
-                client.handle_event(ev);
+            .spawn(move || {
+                while let Ok(ev) = proto::read_event(&mut reader) {
+                    // Stop if the client has been dropped.
+                    let Some(client) = weak.upgrade() else { break };
+                    client.handle_event(ev);
+                }
             })?;
 
         Ok(client)
@@ -91,7 +155,7 @@ impl TermhostClient {
         match ev {
             Event::PaneFrame { pane_id, frame } => {
                 if let Some(state) = self.panes.lock().unwrap().get(&pane_id).cloned() {
-                    *state.latest.lock().unwrap() = Some(frame.into_frame_data());
+                    state.grid.lock().unwrap().apply(frame);
                 }
             }
             Event::PaneExited { pane_id, exit_code } => {
@@ -109,7 +173,7 @@ impl TermhostClient {
     /// Spawns a pane on the backend and returns a handle to it.
     pub fn create_pane(self: &Arc<Self>, spec: PaneSpec) -> io::Result<TermhostPane> {
         let state = Arc::new(PaneState {
-            latest: Mutex::new(None),
+            grid: Mutex::new(PaneGrid::default()),
             exit: Mutex::new(None),
         });
         self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
@@ -142,6 +206,25 @@ pub struct TermhostPane {
     state: Arc<PaneState>,
 }
 
+impl TermhostPane {
+    /// Returns the current accumulated grid as a full frame, or `None` before
+    /// the first frame arrives.
+    pub fn snapshot(&self) -> Option<wire::FrameData> {
+        self.state.grid.lock().unwrap().snapshot()
+    }
+
+    /// Returns whether the grid changed since the last call, clearing the flag.
+    pub fn take_dirty(&self) -> bool {
+        let mut grid = self.state.grid.lock().unwrap();
+        std::mem::replace(&mut grid.dirty, false)
+    }
+
+    /// Returns the latest cursor state reported by the backend.
+    pub fn cursor(&self) -> Option<wire::CursorState> {
+        self.state.grid.lock().unwrap().cursor.clone()
+    }
+}
+
 impl TerminalBackend for TermhostPane {
     fn write_input(&self, bytes: &[u8]) {
         let _ = self.client.send(&Command::Input { pane_id: self.id, data: bytes.to_vec() });
@@ -158,7 +241,7 @@ impl TerminalBackend for TermhostPane {
     }
 
     fn latest_frame(&self) -> Option<wire::FrameData> {
-        self.state.latest.lock().unwrap().clone()
+        self.snapshot()
     }
 
     fn exit_status(&self) -> Option<i32> {

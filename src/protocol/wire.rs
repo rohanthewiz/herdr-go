@@ -675,8 +675,8 @@ pub(crate) fn color_to_u32(color: ratatui::style::Color) -> u32 {
 }
 
 /// Converts a packed u32 back to a ratatui `Color`.
-#[cfg(test)]
-fn u32_to_color(val: u32) -> ratatui::style::Color {
+#[cfg_attr(not(any(test, feature = "termhost")), allow(dead_code))]
+pub(crate) fn u32_to_color(val: u32) -> ratatui::style::Color {
     match val >> 24 {
         0x00 => match val & 0xFF {
             0x00 => ratatui::style::Color::Reset,
@@ -715,8 +715,8 @@ pub(crate) fn modifier_to_u16(modifier: ratatui::style::Modifier) -> u16 {
 }
 
 /// Converts a u16 back to a ratatui `Modifier`.
-#[cfg(test)]
-fn u16_to_modifier(val: u16) -> ratatui::style::Modifier {
+#[cfg_attr(not(any(test, feature = "termhost")), allow(dead_code))]
+pub(crate) fn u16_to_modifier(val: u16) -> ratatui::style::Modifier {
     ratatui::style::Modifier::from_bits_truncate(val)
 }
 
