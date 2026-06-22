@@ -58,6 +58,12 @@ pub enum Command {
     ClosePane {
         pane_id: u32,
     },
+    ScrollViewport {
+        pane_id: u32,
+        /// Lines to scroll: negative = up into history, positive = toward bottom.
+        /// The Go side clamps, so a large positive delta means "scroll to bottom".
+        delta: i32,
+    },
 }
 
 /// Events received Go → Rust.
@@ -124,6 +130,17 @@ pub struct Frame {
     /// the Go side on frames without links (frames carrying links are sent full).
     #[serde(default)]
     pub hyperlinks: Vec<String>,
+    /// Scrollback position, present only when the pane has scrollback history.
+    #[serde(default)]
+    pub scroll: Option<FrameScroll>,
+}
+
+/// Scrollback position carried on a frame (mirrors herdr's ScrollMetrics).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct FrameScroll {
+    pub offset_from_bottom: usize,
+    pub max_offset_from_bottom: usize,
+    pub viewport_rows: usize,
 }
 
 impl Frame {
@@ -240,6 +257,39 @@ mod tests {
                 assert_eq!(pane_id, 5);
                 assert_eq!(cwd, "/tmp/work");
             }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scroll_viewport_command_serializes() {
+        let cmd = Command::ScrollViewport { pane_id: 9, delta: -5 };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"scroll_viewport""#), "{json}");
+        assert!(json.contains(r#""pane_id":9"#), "{json}");
+        assert!(json.contains(r#""delta":-5"#), "{json}");
+    }
+
+    #[test]
+    fn frame_scroll_decodes() {
+        let raw = r#"{"type":"pane_frame","pane_id":9,"frame":{"cols":1,"rows":3,"full":true,"cursor":null,"cells":[],"scroll":{"offset_from_bottom":5,"max_offset_from_bottom":8,"viewport_rows":3}}}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        let frame = match ev {
+            Event::PaneFrame { frame, .. } => frame,
+            other => panic!("wrong event: {other:?}"),
+        };
+        let s = frame.scroll.expect("scroll present");
+        assert_eq!(s.offset_from_bottom, 5);
+        assert_eq!(s.max_offset_from_bottom, 8);
+        assert_eq!(s.viewport_rows, 3);
+    }
+
+    #[test]
+    fn frame_without_scroll_defaults_to_none() {
+        let raw = r#"{"type":"pane_frame","pane_id":9,"frame":{"cols":1,"rows":1,"full":true,"cursor":null,"cells":[]}}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        match ev {
+            Event::PaneFrame { frame, .. } => assert!(frame.scroll.is_none()),
             other => panic!("wrong event: {other:?}"),
         }
     }

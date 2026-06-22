@@ -61,6 +61,9 @@ struct PaneGrid {
     /// (so the table and the cells' indices always replace together); link-free
     /// frames carry an empty table, which is correct since no cell references it.
     hyperlinks: Vec<String>,
+    /// Latest scrollback position reported by the backend (None until a frame with
+    /// scrollback history arrives).
+    scroll: Option<proto::FrameScroll>,
     /// Set when a frame changed the grid; cleared by the render path.
     dirty: bool,
     /// True once at least one frame has been folded in.
@@ -88,6 +91,11 @@ impl PaneGrid {
         }
         self.cursor = frame.cursor;
         self.hyperlinks = frame.hyperlinks;
+        // Scrollback position is updated only when the frame reports it (panes
+        // without history omit it), so the last known position is retained.
+        if frame.scroll.is_some() {
+            self.scroll = frame.scroll;
+        }
         self.dirty = true;
         self.has_frame = true;
     }
@@ -288,6 +296,18 @@ impl TermhostPane {
     /// Returns the latest cursor state reported by the backend.
     pub fn cursor(&self) -> Option<wire::CursorState> {
         self.state.grid.lock().unwrap().cursor.clone()
+    }
+
+    /// Scrolls the pane's viewport by `delta` lines (negative = up into history,
+    /// positive = toward the live bottom). The backend clamps and reports the new
+    /// position on the next frame.
+    pub fn scroll(&self, delta: i32) {
+        let _ = self.client.send(&Command::ScrollViewport { pane_id: self.id, delta });
+    }
+
+    /// Returns the latest scrollback position reported by the backend.
+    pub fn scroll_metrics(&self) -> Option<proto::FrameScroll> {
+        self.state.grid.lock().unwrap().scroll
     }
 }
 

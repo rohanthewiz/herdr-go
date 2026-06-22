@@ -2495,25 +2495,57 @@ impl PaneRuntime {
 
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            pane.scroll(-(lines.min(i32::MAX as usize) as i32));
+            return;
+        }
         self.terminal.scroll_up(lines);
     }
 
     /// Scroll down by N lines (toward live output).
     pub fn scroll_down(&self, lines: usize) {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            pane.scroll(lines.min(i32::MAX as usize) as i32);
+            return;
+        }
         self.terminal.scroll_down(lines);
     }
 
     /// Reset scroll to live view (offset = 0).
     pub fn scroll_reset(&self) {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            pane.scroll(i32::MAX); // a large positive delta; the Go side clamps to the bottom
+            return;
+        }
         self.terminal.scroll_reset();
     }
 
     /// Set scrollback offset measured from the live bottom of the terminal.
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            // Convert the absolute target to a delta from the last reported offset.
+            // Seam delta is positive=down (toward bottom), so delta = current - target.
+            let current = pane.scroll_metrics().map_or(0, |m| m.offset_from_bottom) as i64;
+            let delta = (current - lines as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            pane.scroll(delta);
+            return;
+        }
         self.terminal.set_scroll_offset_from_bottom(lines);
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            return pane.scroll_metrics().map(|m| ScrollMetrics {
+                offset_from_bottom: m.offset_from_bottom,
+                max_offset_from_bottom: m.max_offset_from_bottom,
+                viewport_rows: m.viewport_rows,
+            });
+        }
         self.terminal.scroll_metrics()
     }
 
