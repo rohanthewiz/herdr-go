@@ -70,6 +70,19 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 - e2e `termhost_pane_reports_agent_working_state`: a pane running `exec -a pi sh -c 'printf
   Working...'` reaches `pane.get` with `agent=pi`, `agent_status=working`.
 
+### 6. Consume Go-side OSC 52 clipboard — `5ce148a`
+- Go reconstructs OSC 52 clipboard writes from the raw PTY (libghostty-vt drops them) and emits a
+  new `pane_clipboard` seam event. Rust re-emits it through herdr's own clipboard writer — same
+  `AppEvent::ClipboardWrite { content }` the in-process PTY path uses (the integration philosophy:
+  map Go signals onto *existing* AppEvents).
+- `proto.rs`: `Event::PaneClipboard { pane_id, data: Vec<u8> }` + a `b64_deserialize` (mirror of
+  `b64_serialize`; matches Go's `[]byte`→base64 JSON). Empty `data` = clipboard-clear.
+- `client.rs`: `PaneSignal::Clipboard(Vec<u8>)` + dispatch arm to the per-pane sink.
+- `pane.rs` `finish_termhost`: `PaneSignal::Clipboard(content)` → `AppEvent::ClipboardWrite`.
+- Tests: proto `pane_clipboard_decodes_base64` + `pane_clipboard_empty_is_clear`. (No new e2e —
+  asserting a real system-clipboard write from a child is environment-dependent; the Go side has
+  the `TestHostReportsPaneClipboard` integration test that the event is emitted.)
+
 ---
 
 ## Key facts for future me
@@ -90,6 +103,7 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 ## Commits on `roh/phase-b-termhost-client` (this session)
 
 ```
+5ce148a feat: consume Go-side OSC 52 clipboard for termhost panes
 a24a6aa test: e2e for manifest-driven agent working state (Stage B)
 51f77f0 feat: consume Go-side agent detection for termhost panes (Stage A)
 3ef1b0d feat: route OSC 7 cwd from the termhost backend (Rust side)
@@ -101,9 +115,9 @@ a24a6aa test: e2e for manifest-driven agent working state (Stage B)
 
 ## Next steps
 
-- **Stage C — driver parity (Go side):** pending-idle debounce, startup grace, content-skip,
-  re-check cadences — to kill flicker. No Rust change expected (it just applies `StateChanged`).
-- **OSC 52 clipboard** Go→Rust → `AppEvent::ClipboardWrite` (extend the `PaneSignal` sink).
+- **Stage C — driver parity (Go side):** ✅ shipped Go-side (debounce + process-probe throttle).
+  OSC 9 progress now also fed into Go-side detection. No Rust change needed (it applies `StateChanged`).
+- **OSC 52 clipboard** ✅ done (item 6) — Go emits `pane_clipboard`, Rust → `AppEvent::ClipboardWrite`.
 - **OSC title/scrollback/selection/hyperlinks/kitty** passthrough to lift the remaining
   termhost degradations.
 - Eventually: flip termhost to default, then **delete `src/pty` / `src/ghostty` / `src/terminal`**
