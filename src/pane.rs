@@ -2306,18 +2306,40 @@ impl PaneRuntime {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
 
-        let pane = client
-            .create_pane(PaneSpec {
-                pane_id: pane_id.raw(),
-                cols,
-                rows,
-                cell_width_px: 0,
-                cell_height_px: 0,
-                cwd,
-                command,
-                args,
-                env,
+        // OSC passthrough sink: route the Go backend's reported cwd (OSC 7) into
+        // the same reported_cwd state + AppEvent the in-process path publishes, so
+        // PaneRuntime::cwd() (new-pane inheritance, worktree) works for termhost panes.
+        let reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
+        let osc_sink: crate::termhost::OscSink = {
+            let reported_cwd = reported_cwd.clone();
+            let events = events.clone();
+            Box::new(move |osc| match osc {
+                crate::termhost::PaneOsc::Cwd(cwd) => {
+                    publish_reported_cwd(
+                        pane_id,
+                        std::path::PathBuf::from(cwd),
+                        &reported_cwd,
+                        &events,
+                    );
+                }
             })
+        };
+
+        let pane = client
+            .create_pane(
+                PaneSpec {
+                    pane_id: pane_id.raw(),
+                    cols,
+                    rows,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                    cwd,
+                    command,
+                    args,
+                    env,
+                },
+                Some(osc_sink),
+            )
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         let pane = Arc::new(pane);
 
@@ -2342,7 +2364,6 @@ impl PaneRuntime {
         }
 
         let child_pid = Arc::new(AtomicU32::new(0));
-        let reported_cwd = Arc::new(Mutex::new(None));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
         let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(

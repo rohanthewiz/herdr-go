@@ -266,6 +266,35 @@ fn termhost_pane_renders_shell_output_to_client() {
          — the pane is NOT termhost-backed (in-process fallback?)"
     );
 
+    // OSC 7 passthrough: make the shell emit a working-directory report and assert
+    // it reaches the Rust pane (pane.get cwd). The Go Host scans the raw stream for
+    // OSC 7 and sends a pane_cwd event; the client routes it to reported_cwd.
+    let osc7 = r"printf '\033]7;file://localhost/tmp\033\\'";
+    let resp = send_json_request(
+        &api_socket,
+        "osc",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("{osc7}\n") }),
+    );
+    assert!(resp.get("error").is_none(), "pane.send_text (osc7) failed: {resp}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_cwd = String::new();
+    while Instant::now() < deadline {
+        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        if let Some(cwd) = info["result"]["pane"]["cwd"].as_str() {
+            got_cwd = cwd.to_string();
+            if cwd == "/tmp" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        got_cwd, "/tmp",
+        "OSC 7 cwd should propagate to the termhost pane (pane.get cwd), got {got_cwd:?}"
+    );
+
     drop(spawned);
     cleanup_test_base(&base);
 }

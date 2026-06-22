@@ -14,11 +14,25 @@ use crate::protocol as wire;
 use super::proto::{self, Command, Event};
 use super::TerminalBackend;
 
+/// OSC-derived passthrough from a pane (working directory today; title/clipboard
+/// can be added as the seam grows). Delivered to a per-pane [`OscSink`].
+#[derive(Debug, Clone)]
+pub enum PaneOsc {
+    /// Working directory reported via OSC 7.
+    Cwd(String),
+}
+
+/// Per-pane callback the owner installs to receive [`PaneOsc`] events. Invoked on
+/// the client reader thread, so it must be cheap and non-blocking.
+pub type OscSink = Box<dyn Fn(PaneOsc) + Send + Sync>;
+
 /// Shared, reader-thread-updated state for one pane. The reader thread folds Go
 /// frames into a full accumulated grid; the render path reads snapshots of it.
 struct PaneState {
     grid: Mutex<PaneGrid>,
     exit: Mutex<Option<i32>>,
+    /// Installed at creation; receives OSC passthrough events. Never mutated.
+    osc: Option<OscSink>,
 }
 
 /// Accumulated full grid for one pane. Go sends the full grid each frame with
@@ -158,6 +172,13 @@ impl TermhostClient {
                     state.grid.lock().unwrap().apply(frame);
                 }
             }
+            Event::PaneCwd { pane_id, cwd } => {
+                if let Some(state) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &state.osc {
+                        sink(PaneOsc::Cwd(cwd));
+                    }
+                }
+            }
             Event::PaneExited { pane_id, exit_code } => {
                 if let Some(state) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     *state.exit.lock().unwrap() = Some(exit_code);
@@ -170,11 +191,17 @@ impl TermhostClient {
         }
     }
 
-    /// Spawns a pane on the backend and returns a handle to it.
-    pub fn create_pane(self: &Arc<Self>, spec: PaneSpec) -> io::Result<TermhostPane> {
+    /// Spawns a pane on the backend and returns a handle to it. `osc` receives
+    /// OSC passthrough events (cwd, …) for this pane on the reader thread.
+    pub fn create_pane(
+        self: &Arc<Self>,
+        spec: PaneSpec,
+        osc: Option<OscSink>,
+    ) -> io::Result<TermhostPane> {
         let state = Arc::new(PaneState {
             grid: Mutex::new(PaneGrid::default()),
             exit: Mutex::new(None),
+            osc,
         });
         self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
 

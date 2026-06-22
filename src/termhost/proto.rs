@@ -73,6 +73,10 @@ pub enum Event {
         pane_id: u32,
         frame: Frame,
     },
+    PaneCwd {
+        pane_id: u32,
+        cwd: String,
+    },
     PaneExited {
         pane_id: u32,
         exit_code: i32,
@@ -192,6 +196,19 @@ mod tests {
         let cur = fd.cursor.expect("cursor");
         assert_eq!((cur.x, cur.y, cur.visible, cur.shape), (1, 0, true, 6));
         assert!(fd.hyperlinks.is_empty());
+    }
+
+    #[test]
+    fn pane_cwd_decodes() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_cwd","pane_id":5,"cwd":"/tmp/work"}"#).unwrap();
+        match ev {
+            Event::PaneCwd { pane_id, cwd } => {
+                assert_eq!(pane_id, 5);
+                assert_eq!(cwd, "/tmp/work");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
     }
 
     #[test]
