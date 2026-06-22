@@ -29,6 +29,8 @@ pub enum PaneSignal {
         visible_blocker: bool,
         visible_working: bool,
     },
+    /// Clipboard write reported via OSC 52 (decoded bytes; empty is a clear).
+    Clipboard(Vec<u8>),
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -192,6 +194,13 @@ impl TermhostClient {
                 if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     if let Some(sink) = &pane.sink {
                         sink(PaneSignal::Agent { agent, state, visible_blocker, visible_working });
+                    }
+                }
+            }
+            Event::PaneClipboard { pane_id, data } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &pane.sink {
+                        sink(PaneSignal::Clipboard(data));
                     }
                 }
             }

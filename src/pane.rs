@@ -2348,6 +2348,11 @@ impl PaneRuntime {
                         observed_at: std::time::Instant::now(),
                     });
                 }
+                crate::termhost::PaneSignal::Clipboard(content) => {
+                    // OSC 52 from the Go backend → the same AppEvent the in-process
+                    // path emits, so herdr's clipboard writer re-emits it.
+                    let _ = events.try_send(AppEvent::ClipboardWrite { content });
+                }
             })
         };
 

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::protocol as wire;
 
@@ -88,6 +88,13 @@ pub enum Event {
         #[serde(default)]
         visible_working: bool,
     },
+    PaneClipboard {
+        pane_id: u32,
+        /// Decoded clipboard bytes (base64 on the wire, matching Go's `[]byte`).
+        /// Empty is a clipboard-clear.
+        #[serde(deserialize_with = "b64_deserialize")]
+        data: Vec<u8>,
+    },
     PaneExited {
         pane_id: u32,
         exit_code: i32,
@@ -126,6 +133,11 @@ impl Frame {
 
 fn b64_serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&STANDARD.encode(bytes))
+}
+
+fn b64_deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    let s = String::deserialize(d)?;
+    STANDARD.decode(s.as_bytes()).map_err(serde::de::Error::custom)
 }
 
 fn invalid<E: std::fmt::Display>(e: E) -> io::Error {
@@ -217,6 +229,33 @@ mod tests {
             Event::PaneCwd { pane_id, cwd } => {
                 assert_eq!(pane_id, 5);
                 assert_eq!(cwd, "/tmp/work");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_clipboard_decodes_base64() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_clipboard","pane_id":6,"data":"aGVsbG8="}"#)
+                .unwrap();
+        match ev {
+            Event::PaneClipboard { pane_id, data } => {
+                assert_eq!(pane_id, 6);
+                assert_eq!(data, b"hello");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_clipboard_empty_is_clear() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_clipboard","pane_id":6,"data":""}"#).unwrap();
+        match ev {
+            Event::PaneClipboard { pane_id, data } => {
+                assert_eq!(pane_id, 6);
+                assert!(data.is_empty());
             }
             other => panic!("wrong event: {other:?}"),
         }
