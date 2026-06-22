@@ -68,6 +68,9 @@ pub struct TerminalState {
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     pub manual_label: Option<String>,
+    /// Raw window title from OSC 0/2 (chrome only; agent hook titles take
+    /// precedence). Populated for termhost panes from the Go backend's pane_title.
+    pub terminal_title: Option<String>,
     pub agent_name: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
@@ -92,6 +95,7 @@ impl TerminalState {
             agent_metadata: HashMap::new(),
             persisted_agent_session: None,
             manual_label: None,
+            terminal_title: None,
             agent_name: None,
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
@@ -849,6 +853,17 @@ impl TerminalState {
         self.manual_label = (!label.is_empty()).then_some(label);
     }
 
+    /// Sets the raw OSC 0/2 window title (chrome). An empty/`None` value clears
+    /// it. Returns whether the stored value changed.
+    pub fn set_terminal_title(&mut self, title: Option<String>) -> bool {
+        let title = title.filter(|t| !t.is_empty());
+        if self.terminal_title == title {
+            return false;
+        }
+        self.terminal_title = title;
+        true
+    }
+
     pub fn clear_manual_label(&mut self) {
         self.manual_label = None;
     }
@@ -885,16 +900,22 @@ impl TerminalState {
     }
 
     pub fn border_label(&self, show_agent_labels: bool) -> Option<String> {
-        self.effective_title().or_else(|| {
-            self.manual_label.clone().or_else(|| {
-                show_agent_labels
-                    .then(|| {
-                        self.effective_display_agent()
-                            .or_else(|| self.effective_agent_label().map(str::to_string))
-                    })
-                    .flatten()
+        // Precedence: agent hook title > raw OSC 0/2 terminal title > manual label
+        // > agent label. The OSC title sits above the agent label so a termhost
+        // pane shows the running program's title the way a real terminal does,
+        // while an explicit hook title still wins.
+        self.effective_title()
+            .or_else(|| self.terminal_title.clone())
+            .or_else(|| {
+                self.manual_label.clone().or_else(|| {
+                    show_agent_labels
+                        .then(|| {
+                            self.effective_display_agent()
+                                .or_else(|| self.effective_agent_label().map(str::to_string))
+                        })
+                        .flatten()
+                })
             })
-        })
     }
 
     fn recompute_effective_state(
@@ -1924,6 +1945,35 @@ mod tests {
 
         terminal.set_manual_label("reviewer".into());
         terminal.clear_manual_label();
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn border_label_uses_terminal_title_above_agent_below_manual() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        // OSC title outranks the agent label (program title shows on the border).
+        assert!(terminal.set_terminal_title(Some("vim - main.go".into())));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("vim - main.go"));
+        // It even shows when agent labels are disabled (it's chrome, not an agent label).
+        assert_eq!(terminal.border_label(false).as_deref(), Some("vim - main.go"));
+
+        // Chosen precedence: OSC title sits ABOVE the manual label, so it shadows it.
+        terminal.set_manual_label("reviewer".into());
+        assert_eq!(terminal.border_label(true).as_deref(), Some("vim - main.go"));
+        // With the OSC title cleared, the manual label takes over.
+        assert!(terminal.set_terminal_title(None));
+        assert_eq!(terminal.border_label(true).as_deref(), Some("reviewer"));
+        terminal.clear_manual_label();
+
+        // With nothing else, falls back to the agent label.
+        assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
+        // Setting the same value twice reports no change.
+        assert!(terminal.set_terminal_title(Some("htop".into())));
+        assert!(!terminal.set_terminal_title(Some("htop".into())));
+        // Empty string is treated as a clear.
+        assert!(terminal.set_terminal_title(Some(String::new())));
         assert_eq!(terminal.border_label(true).as_deref(), Some("claude"));
     }
 

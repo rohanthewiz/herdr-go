@@ -2353,6 +2353,13 @@ impl PaneRuntime {
                     // path emits, so herdr's clipboard writer re-emits it.
                     let _ = events.try_send(AppEvent::ClipboardWrite { content });
                 }
+                crate::termhost::PaneSignal::Title(title) => {
+                    // OSC 0/2 window title → terminal chrome. Empty clears it.
+                    let _ = events.try_send(AppEvent::TerminalTitleReported {
+                        pane_id,
+                        title: (!title.is_empty()).then_some(title),
+                    });
+                }
             })
         };
 

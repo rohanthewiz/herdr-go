@@ -31,6 +31,8 @@ pub enum PaneSignal {
     },
     /// Clipboard write reported via OSC 52 (decoded bytes; empty is a clear).
     Clipboard(Vec<u8>),
+    /// Window title reported via OSC 0/2 (empty is a title-clear).
+    Title(String),
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -201,6 +203,13 @@ impl TermhostClient {
                 if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     if let Some(sink) = &pane.sink {
                         sink(PaneSignal::Clipboard(data));
+                    }
+                }
+            }
+            Event::PaneTitle { pane_id, title } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &pane.sink {
+                        sink(PaneSignal::Title(title));
                     }
                 }
             }

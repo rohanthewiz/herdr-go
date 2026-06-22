@@ -106,6 +106,12 @@ pub enum AppEvent {
         pane_id: PaneId,
         cwd: std::path::PathBuf,
     },
+    /// A pane child reported its window title via OSC 0/2 (chrome, not detection).
+    /// `None` clears the title.
+    TerminalTitleReported {
+        pane_id: PaneId,
+        title: Option<String>,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,

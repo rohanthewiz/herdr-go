@@ -2492,6 +2492,19 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::TerminalTitleReported { pane_id, title } => {
+                // Chrome only (border label); not session-persisted, so no dirty mark.
+                let Some(terminal_id) = self.workspaces.iter().find_map(|ws| {
+                    ws.pane_state(pane_id)
+                        .map(|pane| pane.attached_terminal_id.clone())
+                }) else {
+                    return Vec::new();
+                };
+                if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+                    terminal.set_terminal_title(title);
+                }
+                Vec::new()
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,

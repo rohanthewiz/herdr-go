@@ -95,6 +95,12 @@ pub enum Event {
         #[serde(deserialize_with = "b64_deserialize")]
         data: Vec<u8>,
     },
+    PaneTitle {
+        pane_id: u32,
+        /// OSC 0/2 window title; empty is a title-clear.
+        #[serde(default)]
+        title: String,
+    },
     PaneExited {
         pane_id: u32,
         exit_code: i32,
@@ -256,6 +262,20 @@ mod tests {
             Event::PaneClipboard { pane_id, data } => {
                 assert_eq!(pane_id, 6);
                 assert!(data.is_empty());
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_title_decodes() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_title","pane_id":7,"title":"vim - main.go"}"#)
+                .unwrap();
+        match ev {
+            Event::PaneTitle { pane_id, title } => {
+                assert_eq!(pane_id, 7);
+                assert_eq!(title, "vim - main.go");
             }
             other => panic!("wrong event: {other:?}"),
         }
