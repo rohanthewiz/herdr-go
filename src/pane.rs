@@ -2306,21 +2306,47 @@ impl PaneRuntime {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
 
-        // OSC passthrough sink: route the Go backend's reported cwd (OSC 7) into
-        // the same reported_cwd state + AppEvent the in-process path publishes, so
-        // PaneRuntime::cwd() (new-pane inheritance, worktree) works for termhost panes.
+        // Per-pane signal sink: route the Go backend's out-of-band reports into the
+        // same state + AppEvents the in-process path publishes.
+        //  - Cwd (OSC 7) → reported_cwd + TerminalCwdReported (new-pane cwd, worktree).
+        //  - Agent (Go-side detection) → StateChanged, the same path the Rust screen
+        //    detector fed. Go owns detection for termhost panes (the Rust detection
+        //    task is not spawned below).
         let reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
-        let osc_sink: crate::termhost::OscSink = {
+        let signal_sink: crate::termhost::SignalSink = {
             let reported_cwd = reported_cwd.clone();
             let events = events.clone();
-            Box::new(move |osc| match osc {
-                crate::termhost::PaneOsc::Cwd(cwd) => {
+            Box::new(move |signal| match signal {
+                crate::termhost::PaneSignal::Cwd(cwd) => {
                     publish_reported_cwd(
                         pane_id,
                         std::path::PathBuf::from(cwd),
                         &reported_cwd,
                         &events,
                     );
+                }
+                crate::termhost::PaneSignal::Agent {
+                    agent,
+                    state,
+                    visible_blocker,
+                    visible_working,
+                } => {
+                    let detected = crate::detect::parse_agent_label(&agent);
+                    let state = match state.as_str() {
+                        "working" => AgentState::Working,
+                        "blocked" => AgentState::Blocked,
+                        "idle" => AgentState::Idle,
+                        _ => AgentState::Unknown,
+                    };
+                    let _ = events.try_send(AppEvent::StateChanged {
+                        pane_id,
+                        agent: detected,
+                        state,
+                        visible_blocker,
+                        visible_working,
+                        process_exited: false,
+                        observed_at: std::time::Instant::now(),
+                    });
                 }
             })
         };
@@ -2338,7 +2364,7 @@ impl PaneRuntime {
                     args,
                     env,
                 },
-                Some(osc_sink),
+                Some(signal_sink),
             )
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         let pane = Arc::new(pane);
@@ -2363,17 +2389,17 @@ impl PaneRuntime {
             });
         }
 
+        // Detection for termhost panes runs in the Go daemon (reported via the
+        // Agent signal above), so the Rust screen-scan task is not spawned — it
+        // would only read the unfed local emulator. The detection-related fields
+        // are inert placeholders.
+        let _ = &events;
         let child_pid = Arc::new(AtomicU32::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
-        let (detect_handle, detect_reset_notify, pending_release) = spawn_basic_detection_task(
-            pane_id,
-            child_pid.clone(),
-            terminal.clone(),
-            detection_content_seq.clone(),
-            full_lifecycle_authority_active.clone(),
-            events,
-        );
+        let detect_handle = tokio::spawn(async {}).abort_handle();
+        let detect_reset_notify = Arc::new(Notify::new());
+        let pending_release = Arc::new(Mutex::new(None));
 
         Ok(Self {
             pane_id,

@@ -77,6 +77,17 @@ pub enum Event {
         pane_id: u32,
         cwd: String,
     },
+    PaneAgent {
+        pane_id: u32,
+        #[serde(default)]
+        agent: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        visible_blocker: bool,
+        #[serde(default)]
+        visible_working: bool,
+    },
     PaneExited {
         pane_id: u32,
         exit_code: i32,

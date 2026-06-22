@@ -14,25 +14,34 @@ use crate::protocol as wire;
 use super::proto::{self, Command, Event};
 use super::TerminalBackend;
 
-/// OSC-derived passthrough from a pane (working directory today; title/clipboard
-/// can be added as the seam grows). Delivered to a per-pane [`OscSink`].
+/// A per-pane signal pushed from the Go backend (out-of-band from the cell grid):
+/// OSC-derived state and detection results. Delivered to a per-pane [`SignalSink`].
 #[derive(Debug, Clone)]
-pub enum PaneOsc {
+pub enum PaneSignal {
     /// Working directory reported via OSC 7.
     Cwd(String),
+    /// Agent detection result (Go owns detection for termhost panes).
+    Agent {
+        /// Canonical agent label ("claude", "codex", …), or "" for a plain shell.
+        agent: String,
+        /// idle | working | blocked | unknown.
+        state: String,
+        visible_blocker: bool,
+        visible_working: bool,
+    },
 }
 
-/// Per-pane callback the owner installs to receive [`PaneOsc`] events. Invoked on
-/// the client reader thread, so it must be cheap and non-blocking.
-pub type OscSink = Box<dyn Fn(PaneOsc) + Send + Sync>;
+/// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
+/// client reader thread, so it must be cheap and non-blocking.
+pub type SignalSink = Box<dyn Fn(PaneSignal) + Send + Sync>;
 
 /// Shared, reader-thread-updated state for one pane. The reader thread folds Go
 /// frames into a full accumulated grid; the render path reads snapshots of it.
 struct PaneState {
     grid: Mutex<PaneGrid>,
     exit: Mutex<Option<i32>>,
-    /// Installed at creation; receives OSC passthrough events. Never mutated.
-    osc: Option<OscSink>,
+    /// Installed at creation; receives out-of-band pane signals. Never mutated.
+    sink: Option<SignalSink>,
 }
 
 /// Accumulated full grid for one pane. Go sends the full grid each frame with
@@ -174,8 +183,15 @@ impl TermhostClient {
             }
             Event::PaneCwd { pane_id, cwd } => {
                 if let Some(state) = self.panes.lock().unwrap().get(&pane_id).cloned() {
-                    if let Some(sink) = &state.osc {
-                        sink(PaneOsc::Cwd(cwd));
+                    if let Some(sink) = &state.sink {
+                        sink(PaneSignal::Cwd(cwd));
+                    }
+                }
+            }
+            Event::PaneAgent { pane_id, agent, state, visible_blocker, visible_working } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &pane.sink {
+                        sink(PaneSignal::Agent { agent, state, visible_blocker, visible_working });
                     }
                 }
             }
@@ -191,17 +207,17 @@ impl TermhostClient {
         }
     }
 
-    /// Spawns a pane on the backend and returns a handle to it. `osc` receives
-    /// OSC passthrough events (cwd, …) for this pane on the reader thread.
+    /// Spawns a pane on the backend and returns a handle to it. `sink` receives
+    /// out-of-band pane signals (cwd, agent detection, …) on the reader thread.
     pub fn create_pane(
         self: &Arc<Self>,
         spec: PaneSpec,
-        osc: Option<OscSink>,
+        sink: Option<SignalSink>,
     ) -> io::Result<TermhostPane> {
         let state = Arc::new(PaneState {
             grid: Mutex::new(PaneGrid::default()),
             exit: Mutex::new(None),
-            osc,
+            sink,
         });
         self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
 

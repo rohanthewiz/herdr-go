@@ -298,3 +298,66 @@ fn termhost_pane_renders_shell_output_to_client() {
     drop(spawned);
     cleanup_test_base(&base);
 }
+
+#[test]
+fn termhost_pane_reports_agent_identity() {
+    let _lock = test_lock();
+
+    let termhost_socket = match std::env::var("HERDR_TERMHOST_SOCKET") {
+        Ok(path) if !path.is_empty() => path,
+        _ => {
+            eprintln!("SKIP termhost_e2e: HERDR_TERMHOST_SOCKET unset");
+            return;
+        }
+    };
+    if UnixStream::connect(&termhost_socket).is_err() {
+        eprintln!("SKIP termhost_e2e: no daemon reachable at {termhost_socket}");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &termhost_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "ag" }));
+    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
+        .to_string();
+
+    // Replace the shell with a process advertising argv[0]="claude" (a real binary
+    // under a fake name). Go's procscan inspects the foreground process group and
+    // reports the agent over the seam; Rust maps it onto detected agent state.
+    let resp = send_json_request(
+        &api_socket,
+        "agent",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": "exec -a claude sleep 30\n" }),
+    );
+    assert!(resp.get("error").is_none(), "pane.send_text failed: {resp}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_agent = String::new();
+    while Instant::now() < deadline {
+        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        if let Some(agent) = info["result"]["pane"]["agent"].as_str() {
+            got_agent = agent.to_string();
+            if agent == "claude" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    assert_eq!(
+        got_agent, "claude",
+        "Go-side detection should report agent identity to the termhost pane (pane.get agent), got {got_agent:?}"
+    );
+
+    drop(spawned);
+    cleanup_test_base(&base);
+}

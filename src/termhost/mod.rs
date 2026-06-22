@@ -13,7 +13,7 @@
 mod client;
 mod proto;
 
-pub use client::{OscSink, PaneOsc, PaneSpec, TermhostClient, TermhostPane};
+pub use client::{PaneSignal, PaneSpec, SignalSink, TermhostClient, TermhostPane};
 
 use crate::protocol as wire;
 use std::sync::{Arc, OnceLock};
