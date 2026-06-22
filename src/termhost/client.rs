@@ -57,6 +57,10 @@ struct PaneGrid {
     rows: u16,
     cells: Vec<wire::CellData>,
     cursor: Option<wire::CursorState>,
+    /// OSC 8 URI table for the current grid. Frames carrying links are sent full
+    /// (so the table and the cells' indices always replace together); link-free
+    /// frames carry an empty table, which is correct since no cell references it.
+    hyperlinks: Vec<String>,
     /// Set when a frame changed the grid; cleared by the render path.
     dirty: bool,
     /// True once at least one frame has been folded in.
@@ -83,6 +87,7 @@ impl PaneGrid {
             }
         }
         self.cursor = frame.cursor;
+        self.hyperlinks = frame.hyperlinks;
         self.dirty = true;
         self.has_frame = true;
     }
@@ -96,7 +101,7 @@ impl PaneGrid {
             width: self.cols,
             height: self.rows,
             cursor: self.cursor.clone(),
-            hyperlinks: Vec::new(),
+            hyperlinks: self.hyperlinks.clone(),
             graphics: Vec::new(),
         })
     }

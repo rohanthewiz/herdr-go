@@ -120,18 +120,22 @@ pub struct Frame {
     pub full: bool,
     pub cursor: Option<wire::CursorState>,
     pub cells: Vec<wire::CellData>,
+    /// OSC 8 hyperlink URI table; a cell's `hyperlink` indexes into it. Omitted by
+    /// the Go side on frames without links (frames carrying links are sent full).
+    #[serde(default)]
+    pub hyperlinks: Vec<String>,
 }
 
 impl Frame {
-    /// Converts into herdr's render frame. Hyperlinks/graphics are not carried by
-    /// the seam yet (reserved), so they are empty.
+    /// Converts into herdr's render frame. Graphics are not carried by the seam yet
+    /// (reserved); hyperlinks are carried as of OSC 8 passthrough.
     pub fn into_frame_data(self) -> wire::FrameData {
         wire::FrameData {
             cells: self.cells,
             width: self.cols,
             height: self.rows,
             cursor: self.cursor,
-            hyperlinks: Vec::new(),
+            hyperlinks: self.hyperlinks,
             graphics: Vec::new(),
         }
     }
@@ -238,6 +242,20 @@ mod tests {
             }
             other => panic!("wrong event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn frame_with_hyperlinks_carries_table_and_indices() {
+        let raw = r#"{"type":"pane_frame","pane_id":8,"frame":{"cols":2,"rows":1,"full":true,"cursor":null,"cells":[{"symbol":"l","fg":0,"bg":0,"modifier":0,"skip":false,"hyperlink":0},{"symbol":"x","fg":0,"bg":0,"modifier":0,"skip":false,"hyperlink":null}],"hyperlinks":["https://example.com"]}}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        let frame = match ev {
+            Event::PaneFrame { frame, .. } => frame,
+            other => panic!("wrong event: {other:?}"),
+        };
+        let fd = frame.into_frame_data();
+        assert_eq!(fd.hyperlinks, vec!["https://example.com".to_string()]);
+        assert_eq!(fd.cells[0].hyperlink, Some(0));
+        assert_eq!(fd.cells[1].hyperlink, None);
     }
 
     #[test]
