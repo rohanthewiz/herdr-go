@@ -103,6 +103,22 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
   isn't `Serialize` (rebuilt via `new()` on restore), so the new field is persistence-safe.
 - Tests: `border_label_uses_terminal_title_above_agent_below_manual` + proto decode.
 
+### 8. Carry termhost OSC 8 hyperlinks into the frame render path — `5a4aa23` (Go emit: herdr-web `96bec8b`)
+- Unlike the other passthroughs, OSC 8 is *inline per-cell* (a link wraps grid cells), so it rides
+  the **frame/grid path**, not a `pane_*` event. Go raw-extracts URIs (libghostty exposes them only
+  via `GridRef.HyperlinkURI`) and sends a per-cell `hyperlink` index + a frame `hyperlinks` URI table.
+- **Almost no Rust change needed:** `render_ansi` **already** emits OSC 8 from `FrameData`
+  (`cell.hyperlink` → `hyperlinks[index]`), and `proto::Frame` already deserializes cells straight
+  into `wire::CellData` (which has `hyperlink`). The only gap was the URI table.
+- `proto.rs`: `Frame.hyperlinks` (`#[serde(default)]`) + `into_frame_data` carries it.
+- `client.rs`: `PaneGrid.hyperlinks` folded through `apply`/`snapshot`. Link-bearing frames are sent
+  **full** by Go, so the table and cell indices always replace together — no stale-index risk.
+- Tests: proto `frame_with_hyperlinks_carries_table_and_indices`. (Go side has the real-OSC-8
+  `TestHostReportsHyperlinkFrame` integration test.)
+- **Limitation:** lifts hyperlinks for the **frame-data render path** (web/remote ANSI stream). The
+  native-TUI mouse resolver `visible_hyperlinks` still reads the *unfed* local emulator for termhost
+  panes (`viewport_hyperlink_uri`), so TUI click-to-open won't see them — separate follow-up.
+
 ---
 
 ## Key facts for future me
@@ -114,8 +130,8 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 - **`AgentStatus` serializes snake_case** (`working`/`idle`/`blocked`/`done`/`unknown`); derived
   from `(AgentState, seen)` in `pane_agent_status` (`src/app/api_helpers.rs`).
 - **Degraded for termhost panes (by design, until more Go signals land):** selection, scrollback,
-  hyperlinks, kitty graphics. (OSC title-as-chrome ✅ lifted in item 7.) Key encoding stays
-  Rust-side (raw bytes).
+  kitty graphics. (OSC title-as-chrome ✅ item 7; OSC 8 hyperlinks ✅ item 8 for the web render
+  path — TUI click resolution still pending.) Key encoding stays Rust-side (raw bytes).
 - **Build/run:** `export ZIG="~/projs/go/herdr-web/.tools/zig-wrapped"`; run e2e with
   `HERDR_TERMHOST_SOCKET=<sock> cargo test --features termhost --test termhost_e2e -- --test-threads=1`
   against a running Go `cmd/termhost` daemon.
@@ -124,6 +140,7 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 ## Commits on `roh/phase-b-termhost-client` (this session)
 
 ```
+5a4aa23 feat: carry termhost OSC 8 hyperlinks into the frame render path
 7f32edf feat: show termhost OSC 0/2 window title on the pane border
 5ce148a feat: consume Go-side OSC 52 clipboard for termhost panes
 a24a6aa test: e2e for manifest-driven agent working state (Stage B)
@@ -141,7 +158,8 @@ a24a6aa test: e2e for manifest-driven agent working state (Stage B)
   OSC 9 progress now also fed into Go-side detection. No Rust change needed (it applies `StateChanged`).
 - **OSC 52 clipboard** ✅ done (item 6) — Go emits `pane_clipboard`, Rust → `AppEvent::ClipboardWrite`.
 - **OSC 0/2 title** ✅ done (item 7) — Go emits `pane_title`, Rust → `terminal_title` → border chrome.
-- **scrollback/selection/hyperlinks/kitty** passthrough to lift the remaining termhost degradations.
-  Hyperlinks (OSC 8) are the closest analog to the OSC passthrough scanners already built.
+- **scrollback/selection/kitty** passthrough to lift the remaining termhost degradations.
+- **TUI hyperlink clicks for termhost panes:** wire the frame `hyperlinks` table into the
+  `visible_hyperlinks` mouse-resolver path (it currently reads the unfed local emulator).
 - Eventually: flip termhost to default, then **delete `src/pty` / `src/ghostty` / `src/terminal`**
   for the pane path and drop the unfed-emulator placeholder in `finish_termhost`.
