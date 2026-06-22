@@ -83,6 +83,26 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
   asserting a real system-clipboard write from a child is environment-dependent; the Go side has
   the `TestHostReportsPaneClipboard` integration test that the event is emitted.)
 
+### 7. Show termhost OSC 0/2 window title on the pane border — `7f32edf` (Go emit: herdr-web `6807bbb`)
+- Go raw-scans OSC 0/2 (libghostty surfaces it to its emulator for detection, but the seam carried
+  none) and emits a new `pane_title` event. Rust consumes it as **terminal chrome**.
+- **Finding:** herdr did NOT previously show the raw OSC title as chrome — `border_label` is
+  hook-metadata title (`effective_title`) → manual label → agent label; the raw OSC 0/2 title was
+  only detection evidence. So this is **new** border behavior (termhost panes only, since only they
+  populate `terminal_title`).
+- `proto.rs`: `Event::PaneTitle { pane_id, title }` (+ `pane_title_decodes` test).
+- `client.rs`: `PaneSignal::Title(String)` + dispatch arm.
+- `pane.rs` `finish_termhost`: `PaneSignal::Title` → `AppEvent::TerminalTitleReported { pane_id,
+  title: non-empty-or-None }`.
+- `events.rs`: `AppEvent::TerminalTitleReported`. `app/actions.rs`: handler resolves pane→terminal
+  and `set_terminal_title` (chrome only — **not** session-persisted, no dirty mark; mirrors the
+  `TerminalCwdReported` arm).
+- `terminal/state.rs`: new `terminal_title` field + `set_terminal_title`; **`border_label`
+  precedence: hook title > OSC title > manual label > agent label** (user-chosen via the option
+  preview — note the OSC title shadows a manual label; one-line swap if undesired). `TerminalState`
+  isn't `Serialize` (rebuilt via `new()` on restore), so the new field is persistence-safe.
+- Tests: `border_label_uses_terminal_title_above_agent_below_manual` + proto decode.
+
 ---
 
 ## Key facts for future me
@@ -94,7 +114,8 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 - **`AgentStatus` serializes snake_case** (`working`/`idle`/`blocked`/`done`/`unknown`); derived
   from `(AgentState, seen)` in `pane_agent_status` (`src/app/api_helpers.rs`).
 - **Degraded for termhost panes (by design, until more Go signals land):** selection, scrollback,
-  hyperlinks, kitty graphics, OSC title-as-chrome. Key encoding stays Rust-side (raw bytes).
+  hyperlinks, kitty graphics. (OSC title-as-chrome ✅ lifted in item 7.) Key encoding stays
+  Rust-side (raw bytes).
 - **Build/run:** `export ZIG="~/projs/go/herdr-web/.tools/zig-wrapped"`; run e2e with
   `HERDR_TERMHOST_SOCKET=<sock> cargo test --features termhost --test termhost_e2e -- --test-threads=1`
   against a running Go `cmd/termhost` daemon.
@@ -103,6 +124,7 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 ## Commits on `roh/phase-b-termhost-client` (this session)
 
 ```
+7f32edf feat: show termhost OSC 0/2 window title on the pane border
 5ce148a feat: consume Go-side OSC 52 clipboard for termhost panes
 a24a6aa test: e2e for manifest-driven agent working state (Stage B)
 51f77f0 feat: consume Go-side agent detection for termhost panes (Stage A)
@@ -118,7 +140,8 @@ a24a6aa test: e2e for manifest-driven agent working state (Stage B)
 - **Stage C — driver parity (Go side):** ✅ shipped Go-side (debounce + process-probe throttle).
   OSC 9 progress now also fed into Go-side detection. No Rust change needed (it applies `StateChanged`).
 - **OSC 52 clipboard** ✅ done (item 6) — Go emits `pane_clipboard`, Rust → `AppEvent::ClipboardWrite`.
-- **OSC title/scrollback/selection/hyperlinks/kitty** passthrough to lift the remaining
-  termhost degradations.
+- **OSC 0/2 title** ✅ done (item 7) — Go emits `pane_title`, Rust → `terminal_title` → border chrome.
+- **scrollback/selection/hyperlinks/kitty** passthrough to lift the remaining termhost degradations.
+  Hyperlinks (OSC 8) are the closest analog to the OSC passthrough scanners already built.
 - Eventually: flip termhost to default, then **delete `src/pty` / `src/ghostty` / `src/terminal`**
   for the pane path and drop the unfed-emulator placeholder in `finish_termhost`.
