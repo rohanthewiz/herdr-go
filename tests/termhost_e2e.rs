@@ -361,3 +361,62 @@ fn termhost_pane_reports_agent_identity() {
     drop(spawned);
     cleanup_test_base(&base);
 }
+
+#[test]
+fn termhost_pane_reports_agent_working_state() {
+    let _lock = test_lock();
+
+    let termhost_socket = match std::env::var("HERDR_TERMHOST_SOCKET") {
+        Ok(path) if !path.is_empty() => path,
+        _ => {
+            eprintln!("SKIP termhost_e2e: HERDR_TERMHOST_SOCKET unset");
+            return;
+        }
+    };
+    if UnixStream::connect(&termhost_socket).is_err() {
+        eprintln!("SKIP termhost_e2e: no daemon reachable at {termhost_socket}");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &termhost_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "wk" }));
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
+        .to_string();
+
+    // Become a process named "pi" (agent) that continuously prints the pi
+    // manifest's working marker, so Go classifies state=working via the manifest.
+    let resp = send_json_request(
+        &api_socket,
+        "work",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": "exec -a pi sh -c 'while :; do printf \"Working...\"; sleep 1; done'\n" }),
+    );
+    assert!(resp.get("error").is_none(), "pane.send_text failed: {resp}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last = json!(null);
+    while Instant::now() < deadline {
+        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        let agent = info["result"]["pane"]["agent"].as_str().unwrap_or("");
+        let status = info["result"]["pane"]["agent_status"].as_str().unwrap_or("");
+        last = info["result"]["pane"].clone();
+        if agent == "pi" && status == "working" {
+            drop(spawned);
+            cleanup_test_base(&base);
+            return;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    drop(spawned);
+    cleanup_test_base(&base);
+    panic!("expected agent=pi status=working from manifest detection; last pane = {last}");
+}
