@@ -119,6 +119,22 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
   native-TUI mouse resolver `visible_hyperlinks` still reads the *unfed* local emulator for termhost
   panes (`viewport_hyperlink_uri`), so TUI click-to-open won't see them — separate follow-up.
 
+### 9. Drive termhost scrollback through the Go backend — `048875f` (Go emit: herdr-web `3fc51c5`)
+- Needs a **command** (Rust→Go), not just an event. The Go backend now has real scrollback
+  (libghostty defaulted to 0 history!), a `ScrollViewport` command, and reports its position on each
+  frame. Previously `PaneRuntime`'s scroll path fell through to the *unfed placeholder* emulator.
+- `proto.rs`: `Command::ScrollViewport { pane_id, delta }` (neg=up, pos=down; Go clamps so a big
+  positive delta = scroll-to-bottom) + `Frame.scroll` (`FrameScroll`, `#[serde(default)]`).
+- `client.rs`: `PaneGrid.scroll` retained through `apply` (frames omit it when no history);
+  `TermhostPane.scroll(delta)` / `scroll_metrics()`.
+- `pane.rs`: `PaneRuntime`'s `scroll_up/down/reset/set_scroll_offset_from_bottom/scroll_metrics`
+  branch to the termhost backend, mapping to/from the seam delta (`set_offset` computes the delta
+  from the last reported offset; `scroll_reset` sends `i32::MAX`). No `TerminalBackend` trait change
+  — `PaneRuntime` reaches the pane via the concrete `io.termhost_pane()` handle.
+- Tests: proto scroll-command serialize + frame-scroll decode (+ default-none). (Go side has the
+  empirical `TestScrollback` + host `TestHostScrollbackReportsMetrics`.)
+- **Follow-up:** new output snaps the viewport to the bottom (no scroll-lock/pinning yet).
+
 ---
 
 ## Key facts for future me
@@ -129,8 +145,8 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
   consumers. cwd → `TerminalCwdReported` (via `publish_reported_cwd`); agent → `StateChanged`.
 - **`AgentStatus` serializes snake_case** (`working`/`idle`/`blocked`/`done`/`unknown`); derived
   from `(AgentState, seen)` in `pane_agent_status` (`src/app/api_helpers.rs`).
-- **Degraded for termhost panes (by design, until more Go signals land):** selection, scrollback,
-  kitty graphics. (OSC title-as-chrome ✅ item 7; OSC 8 hyperlinks ✅ item 8 for the web render
+- **Degraded for termhost panes (by design, until more Go signals land):** selection, kitty
+  graphics. (scrollback ✅ item 9.) (OSC title-as-chrome ✅ item 7; OSC 8 hyperlinks ✅ item 8 for the web render
   path — TUI click resolution still pending.) Key encoding stays Rust-side (raw bytes).
 - **Build/run:** `export ZIG="~/projs/go/herdr-web/.tools/zig-wrapped"`; run e2e with
   `HERDR_TERMHOST_SOCKET=<sock> cargo test --features termhost --test termhost_e2e -- --test-threads=1`
@@ -140,6 +156,7 @@ retired for termhost panes. All termhost code is behind `--features termhost` an
 ## Commits on `roh/phase-b-termhost-client` (this session)
 
 ```
+048875f feat: drive termhost scrollback through the Go backend
 5a4aa23 feat: carry termhost OSC 8 hyperlinks into the frame render path
 7f32edf feat: show termhost OSC 0/2 window title on the pane border
 5ce148a feat: consume Go-side OSC 52 clipboard for termhost panes
@@ -158,8 +175,12 @@ a24a6aa test: e2e for manifest-driven agent working state (Stage B)
   OSC 9 progress now also fed into Go-side detection. No Rust change needed (it applies `StateChanged`).
 - **OSC 52 clipboard** ✅ done (item 6) — Go emits `pane_clipboard`, Rust → `AppEvent::ClipboardWrite`.
 - **OSC 0/2 title** ✅ done (item 7) — Go emits `pane_title`, Rust → `terminal_title` → border chrome.
-- **scrollback/selection/kitty** passthrough to lift the remaining termhost degradations.
-- **TUI hyperlink clicks for termhost panes:** wire the frame `hyperlinks` table into the
-  `visible_hyperlinks` mouse-resolver path (it currently reads the unfed local emulator).
+- **Selection (next):** decided model — Go request/response. `RequestSelection { pane_id, anchor,
+  cursor }` command → ghostty selection formatter (`WithSelection`) → `pane_selection { text }`
+  event → `AppEvent::ClipboardWrite`. The item-9 scroll metrics are the foundation for its absolute
+  (screen-buffer) coordinates. Wire `PaneRuntime.extract_selection` to the termhost backend.
+- **kitty graphics** passthrough — the last degradation.
+- **Follow-ups:** scroll-lock/pinning (output snaps to bottom today); TUI hyperlink click resolver
+  (`visible_hyperlinks` still reads the unfed local emulator).
 - Eventually: flip termhost to default, then **delete `src/pty` / `src/ghostty` / `src/terminal`**
   for the pane path and drop the unfed-emulator placeholder in `finish_termhost`.
