@@ -64,6 +64,30 @@ pub enum Command {
         /// The Go side clamps, so a large positive delta means "scroll to bottom".
         delta: i32,
     },
+    RequestSelection {
+        pane_id: u32,
+        /// Selection endpoints in screen-buffer (absolute) coordinates. The Go side
+        /// orders them, so anchor/cursor may be in any reading order.
+        anchor: SelectionPoint,
+        cursor: SelectionPoint,
+        /// Block (rectangular) selection rather than linear; herdr only does linear.
+        #[serde(skip_serializing_if = "is_false")]
+        rectangle: bool,
+    },
+}
+
+/// One endpoint of a selection, in screen-buffer (absolute) coordinates: `row`
+/// counts from the top of the scrollback buffer (stable across scroll), `col` is
+/// the 0-based column. Mirrors herdr's [`Selection`](crate::selection::Selection)
+/// endpoints, which it already tracks in screen-buffer space.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SelectionPoint {
+    pub row: u32,
+    pub col: u16,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Events received Go → Rust.
@@ -106,6 +130,14 @@ pub enum Event {
         /// OSC 0/2 window title; empty is a title-clear.
         #[serde(default)]
         title: String,
+    },
+    PaneSelection {
+        pane_id: u32,
+        /// Plain text of the requested selection (unwrapped, trailing-trimmed by the
+        /// Go side). Empty means the range had no selectable content. This is the
+        /// reply to a [`Command::RequestSelection`].
+        #[serde(default)]
+        text: String,
     },
     PaneExited {
         pane_id: u32,
@@ -344,6 +376,60 @@ mod tests {
             Event::PaneTitle { pane_id, title } => {
                 assert_eq!(pane_id, 7);
                 assert_eq!(title, "vim - main.go");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_selection_serializes() {
+        let cmd = Command::RequestSelection {
+            pane_id: 4,
+            anchor: SelectionPoint { row: 3, col: 0 },
+            cursor: SelectionPoint { row: 1, col: 7 },
+            rectangle: false,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"request_selection""#), "{json}");
+        assert!(json.contains(r#""anchor":{"row":3,"col":0}"#), "{json}");
+        assert!(json.contains(r#""cursor":{"row":1,"col":7}"#), "{json}");
+        // rectangle=false is omitted (matches Go's omitempty).
+        assert!(!json.contains("rectangle"), "{json}");
+    }
+
+    #[test]
+    fn request_selection_keeps_rectangle_when_true() {
+        let cmd = Command::RequestSelection {
+            pane_id: 4,
+            anchor: SelectionPoint { row: 0, col: 0 },
+            cursor: SelectionPoint { row: 0, col: 1 },
+            rectangle: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""rectangle":true"#), "{json}");
+    }
+
+    #[test]
+    fn pane_selection_decodes() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_selection","pane_id":4,"text":"HELLO"}"#).unwrap();
+        match ev {
+            Event::PaneSelection { pane_id, text } => {
+                assert_eq!(pane_id, 4);
+                assert_eq!(text, "HELLO");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_selection_defaults_empty_text() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_selection","pane_id":4}"#).unwrap();
+        match ev {
+            Event::PaneSelection { pane_id, text } => {
+                assert_eq!(pane_id, 4);
+                assert!(text.is_empty());
             }
             other => panic!("wrong event: {other:?}"),
         }

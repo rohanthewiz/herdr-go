@@ -2360,6 +2360,16 @@ impl PaneRuntime {
                         title: (!title.is_empty()).then_some(title),
                     });
                 }
+                crate::termhost::PaneSignal::Selection(text) => {
+                    // Reply to a RequestSelection → copy to clipboard, the same
+                    // AppEvent the in-process drag-copy path produces. Empty means the
+                    // range had no selectable content, so there is nothing to copy.
+                    if !text.is_empty() {
+                        let _ = events.try_send(AppEvent::ClipboardWrite {
+                            content: text.into_bytes(),
+                        });
+                    }
+                }
             })
         };
 
@@ -2629,6 +2639,22 @@ impl PaneRuntime {
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.terminal.extract_selection(selection)
+    }
+
+    /// For a termhost pane, asks the Go backend to extract the selection text and
+    /// returns true. The backend replies asynchronously and the text is copied to
+    /// the clipboard via [`AppEvent::ClipboardWrite`] (the local emulator is unfed
+    /// for termhost panes, so `extract_selection` can't read it synchronously).
+    /// Returns false for in-process panes, where the caller extracts+copies inline.
+    pub fn request_termhost_selection(&self, selection: &crate::selection::Selection) -> bool {
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            let ((anchor_row, anchor_col), (cursor_row, cursor_col)) = selection.ordered_cells();
+            pane.request_selection(anchor_row, anchor_col, cursor_row, cursor_col, false);
+            return true;
+        }
+        let _ = selection;
+        false
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {

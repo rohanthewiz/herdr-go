@@ -313,6 +313,10 @@ impl TerminalRuntime {
         self.0.extract_selection(selection)
     }
 
+    pub fn request_termhost_selection(&self, selection: &crate::selection::Selection) -> bool {
+        self.0.request_termhost_selection(selection)
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         self.0.render(frame, area, show_cursor);
     }

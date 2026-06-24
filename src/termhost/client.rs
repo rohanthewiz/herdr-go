@@ -33,6 +33,9 @@ pub enum PaneSignal {
     Clipboard(Vec<u8>),
     /// Window title reported via OSC 0/2 (empty is a title-clear).
     Title(String),
+    /// Reply to a selection request: the extracted text (empty = no content). The
+    /// owner copies it to the clipboard, the same way the in-process path does.
+    Selection(String),
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -226,6 +229,13 @@ impl TermhostClient {
                     }
                 }
             }
+            Event::PaneSelection { pane_id, text } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &pane.sink {
+                        sink(PaneSignal::Selection(text));
+                    }
+                }
+            }
             Event::PaneExited { pane_id, exit_code } => {
                 if let Some(state) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     *state.exit.lock().unwrap() = Some(exit_code);
@@ -308,6 +318,26 @@ impl TermhostPane {
     /// Returns the latest scrollback position reported by the backend.
     pub fn scroll_metrics(&self) -> Option<proto::FrameScroll> {
         self.state.grid.lock().unwrap().scroll
+    }
+
+    /// Requests the text of the selection bounded by the two screen-buffer
+    /// endpoints. The Go backend resolves and orders the coordinates and replies
+    /// asynchronously with a `pane_selection` event, delivered as
+    /// [`PaneSignal::Selection`] to this pane's sink.
+    pub fn request_selection(
+        &self,
+        anchor_row: u32,
+        anchor_col: u16,
+        cursor_row: u32,
+        cursor_col: u16,
+        rectangle: bool,
+    ) {
+        let _ = self.client.send(&Command::RequestSelection {
+            pane_id: self.id,
+            anchor: proto::SelectionPoint { row: anchor_row, col: anchor_col },
+            cursor: proto::SelectionPoint { row: cursor_row, col: cursor_col },
+            rectangle,
+        });
     }
 }
 
