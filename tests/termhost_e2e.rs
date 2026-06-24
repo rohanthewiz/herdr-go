@@ -615,6 +615,65 @@ fn termhost_managed_daemon_is_persistent_and_survives_herdr_death() {
     cleanup_test_base(&base);
 }
 
+/// The clean-quit counterpart to the persistence test: when herdr exits *cleanly*
+/// (SIGINT, not a crash/handoff), it tells the persistent daemon to shut down so it
+/// doesn't linger to its idle timeout.
+#[test]
+fn termhost_clean_server_quit_stops_daemon() {
+    let _lock = test_lock();
+
+    let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP termhost clean-quit: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            return;
+        }
+    };
+    if !Path::new(&daemon_bin).exists() {
+        eprintln!("SKIP termhost clean-quit: HERDR_TERMHOST_BIN {daemon_bin} not found");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let tmpdir = base.join("tmp");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned =
+        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
+    let herdr_pid = spawned.child.process_id().expect("herdr should report a pid");
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+    send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "clean" }));
+    let managed_socket = termhost_socket_path(&config_home, None);
+    assert!(
+        wait_until_exists(&managed_socket, Duration::from_secs(10)),
+        "herdr should have spawned a persistent daemon at {managed_socket:?}"
+    );
+
+    // Clean quit (SIGINT) → herdr sends the daemon a shutdown command on exit.
+    // SAFETY: herdr_pid is a process we spawned; SIGINT is always valid.
+    unsafe {
+        libc::kill(herdr_pid as libc::pid_t, libc::SIGINT);
+    }
+
+    // The daemon should exit and remove its socket promptly — not linger to its idle
+    // timeout — proving the clean-quit path tore it down.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline && managed_socket.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !managed_socket.exists(),
+        "a clean server quit should stop the persistent daemon, but {managed_socket:?} remains"
+    );
+
+    drop(spawned); // herdr is already exiting; ensure it's reaped
+    cleanup_test_base(&base);
+}
+
 /// The headline 3b proof: a termhost shell SURVIVES a full herdr restart. herdr A
 /// spawns a persistent daemon and a pane; herdr A is killed (daemon + shell live
 /// on); herdr B restarts the same session, reconnects to the daemon, and ADOPTS the

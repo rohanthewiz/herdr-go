@@ -221,6 +221,11 @@ pub struct HeadlessServer {
     shutting_down: bool,
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
+    /// Set once a live handoff has completed: this server is exiting but a
+    /// replacement is taking over, so on exit we must NOT tear down the persistent
+    /// termhost daemon (the new server reconnects and adopts its panes). A plain
+    /// clean quit leaves this false and does tear the daemon down.
+    handed_off: bool,
     /// Imported panes get one app-safe resize nudge after the first client attaches.
     #[cfg(unix)]
     pending_handoff_repaint_nudge: bool,
@@ -410,6 +415,7 @@ impl HeadlessServer {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            handed_off: false,
             #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
             should_quit,
@@ -1006,6 +1012,7 @@ impl HeadlessServer {
         self.shutting_down = true;
         self.app.state.should_quit = true;
         self.app.no_session = true;
+        self.handed_off = true; // exiting via handoff: keep the termhost daemon alive
         info!("live handoff completed; old server exiting");
         Ok(())
     }
@@ -3649,7 +3656,16 @@ pub fn run_server() -> io::Result<()> {
         );
         print_ready_message(&api::socket_path(), &client_socket_path());
 
-        server.run().await
+        let run_result = server.run().await;
+        // On a clean quit, tell the persistent termhost daemon to exit so it doesn't
+        // linger to its idle timeout. A handoff is NOT a clean quit: the replacement
+        // server reconnects and adopts the daemon's panes, so leave it running. A
+        // crash skips this entirely (the block never returns), so the daemon survives.
+        #[cfg(feature = "termhost")]
+        if !server.handed_off {
+            crate::termhost::shutdown();
+        }
+        run_result
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));
@@ -3870,6 +3886,7 @@ mod tests {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            handed_off: false,
             #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
             #[cfg(unix)]
