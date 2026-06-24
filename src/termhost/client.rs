@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::protocol as wire;
 
@@ -33,9 +34,6 @@ pub enum PaneSignal {
     Clipboard(Vec<u8>),
     /// Window title reported via OSC 0/2 (empty is a title-clear).
     Title(String),
-    /// Reply to a selection request: the extracted text (empty = no content). The
-    /// owner copies it to the clipboard, the same way the in-process path does.
-    Selection(String),
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -49,6 +47,11 @@ struct PaneState {
     exit: Mutex<Option<i32>>,
     /// Installed at creation; receives out-of-band pane signals. Never mutated.
     sink: Option<SignalSink>,
+    /// One-shot for an in-flight blocking selection request: the reader thread
+    /// hands the `pane_selection` reply text to the waiting caller. Selection
+    /// requests are issued one at a time from the UI thread (which then blocks on
+    /// the reply), so a single slot is enough and replies are FIFO over the socket.
+    pending_selection: Mutex<Option<mpsc::Sender<String>>>,
 }
 
 /// Accumulated full grid for one pane. Go sends the full grid each frame with
@@ -231,8 +234,10 @@ impl TermhostClient {
             }
             Event::PaneSelection { pane_id, text } => {
                 if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
-                    if let Some(sink) = &pane.sink {
-                        sink(PaneSignal::Selection(text));
+                    // Reply to a blocking extract_selection: hand it to the waiter.
+                    // Take the slot so a late/duplicate reply has nowhere to go.
+                    if let Some(tx) = pane.pending_selection.lock().unwrap().take() {
+                        let _ = tx.send(text);
                     }
                 }
             }
@@ -259,6 +264,7 @@ impl TermhostClient {
             grid: Mutex::new(PaneGrid::default()),
             exit: Mutex::new(None),
             sink,
+            pending_selection: Mutex::new(None),
         });
         self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
 
@@ -320,26 +326,54 @@ impl TermhostPane {
         self.state.grid.lock().unwrap().scroll
     }
 
-    /// Requests the text of the selection bounded by the two screen-buffer
-    /// endpoints. The Go backend resolves and orders the coordinates and replies
-    /// asynchronously with a `pane_selection` event, delivered as
-    /// [`PaneSignal::Selection`] to this pane's sink.
-    pub fn request_selection(
+    /// Extracts the text of the selection bounded by the two screen-buffer
+    /// endpoints, blocking until the Go backend (which owns the fed emulator)
+    /// replies. The local emulator is unfed for termhost panes, so this round-trip
+    /// is the only way to read selection text. Returns `None` on send failure or if
+    /// no reply arrives within the timeout (the backend resolves and orders the
+    /// coordinates and replies with a `pane_selection` event); an empty string means
+    /// the range had no selectable content.
+    pub fn extract_selection_blocking(
         &self,
         anchor_row: u32,
         anchor_col: u16,
         cursor_row: u32,
         cursor_col: u16,
         rectangle: bool,
-    ) {
-        let _ = self.client.send(&Command::RequestSelection {
-            pane_id: self.id,
-            anchor: proto::SelectionPoint { row: anchor_row, col: anchor_col },
-            cursor: proto::SelectionPoint { row: cursor_row, col: cursor_col },
-            rectangle,
-        });
+    ) -> Option<String> {
+        let (tx, rx) = mpsc::channel();
+        // Register the waiter before sending so the reply can't race ahead of us.
+        *self.state.pending_selection.lock().unwrap() = Some(tx);
+
+        if self
+            .client
+            .send(&Command::RequestSelection {
+                pane_id: self.id,
+                anchor: proto::SelectionPoint { row: anchor_row, col: anchor_col },
+                cursor: proto::SelectionPoint { row: cursor_row, col: cursor_col },
+                rectangle,
+            })
+            .is_err()
+        {
+            *self.state.pending_selection.lock().unwrap() = None;
+            return None;
+        }
+
+        match rx.recv_timeout(SELECTION_REPLY_TIMEOUT) {
+            Ok(text) => Some(text),
+            Err(_) => {
+                // Timed out or the backend is gone: drop the stale waiter.
+                *self.state.pending_selection.lock().unwrap() = None;
+                None
+            }
+        }
     }
 }
+
+/// Upper bound on a blocking selection round-trip. The backend formats under its
+/// per-pane emulator lock, so a reply is normally sub-millisecond over the local
+/// socket; this only guards against a wedged or dead daemon hanging the UI thread.
+const SELECTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl TerminalBackend for TermhostPane {
     fn write_input(&self, bytes: &[u8]) {
@@ -367,5 +401,67 @@ impl TerminalBackend for TermhostPane {
     fn close(&self) {
         let _ = self.client.send(&Command::ClosePane { pane_id: self.id });
         self.client.panes.lock().unwrap().remove(&self.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    fn read_frame(r: &mut impl Read) -> Vec<u8> {
+        let mut hdr = [0u8; 4];
+        r.read_exact(&mut hdr).unwrap();
+        let n = u32::from_le_bytes(hdr) as usize;
+        let mut buf = vec![0u8; n];
+        r.read_exact(&mut buf).unwrap();
+        buf
+    }
+
+    fn write_frame(w: &mut impl Write, json: &str) {
+        w.write_all(&(json.len() as u32).to_le_bytes()).unwrap();
+        w.write_all(json.as_bytes()).unwrap();
+        w.flush().unwrap();
+    }
+
+    // A fake daemon over a real Unix socket validates the full blocking
+    // request/response: connect handshake → create_pane → extract_selection_blocking
+    // sends request_selection, the reader thread routes the pane_selection reply back
+    // to the waiting caller.
+    #[test]
+    fn extract_selection_blocking_round_trips() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("herdr-th-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let daemon = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let _hello = read_frame(&mut conn); // Hello
+            write_frame(&mut conn, r#"{"type":"welcome","protocol_version":1}"#);
+            let _create = read_frame(&mut conn); // CreatePane
+            let req = read_frame(&mut conn); // RequestSelection
+            // Echo back proof the request reached us, then reply with the text.
+            let req: serde_json::Value = serde_json::from_slice(&req).unwrap();
+            assert_eq!(req["type"], "request_selection");
+            assert_eq!(req["anchor"]["row"], 0);
+            assert_eq!(req["cursor"]["col"], 4);
+            write_frame(
+                &mut conn,
+                r#"{"type":"pane_selection","pane_id":1,"text":"HELLO"}"#,
+            );
+        });
+
+        let client = TermhostClient::connect(path.to_str().unwrap()).unwrap();
+        let pane = client
+            .create_pane(PaneSpec { pane_id: 1, cols: 40, rows: 5, ..Default::default() }, None)
+            .unwrap();
+
+        let text = pane.extract_selection_blocking(0, 0, 0, 4, false);
+        assert_eq!(text, Some("HELLO".to_string()));
+
+        daemon.join().unwrap();
+        let _ = std::fs::remove_file(&path);
     }
 }

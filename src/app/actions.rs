@@ -1961,17 +1961,13 @@ impl AppState {
             _ => return,
         };
 
-        if let Some(rt) = self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id) {
-            // Termhost panes can't be read synchronously (the local emulator is
-            // unfed); ask the Go backend, which replies with the text asynchronously
-            // and it lands on the clipboard via AppEvent::ClipboardWrite.
-            if rt.request_termhost_selection(&sel) {
-                info!("requested termhost selection copy");
-            } else if let Some(text) = rt.extract_selection(&sel) {
-                if !text.is_empty() {
-                    self.request_clipboard_write = Some(text.into_bytes());
-                    info!("copied selection to clipboard");
-                }
+        let text = self
+            .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, sel.pane_id)
+            .and_then(|rt| rt.extract_selection(&sel));
+        if let Some(text) = text {
+            if !text.is_empty() {
+                self.request_clipboard_write = Some(text.into_bytes());
+                info!("copied selection to clipboard");
             }
         }
 
