@@ -106,6 +106,47 @@ fn spawn_server(
     SpawnedHerdr { _master: Some(pair.master), child }
 }
 
+/// Like [`spawn_server`] but in *managed* mode: instead of attaching to a
+/// hand-launched daemon, herdr is told the daemon *binary* (HERDR_TERMHOST_BIN) and
+/// spawns/supervises it itself. `tmpdir` becomes the child's TMPDIR so the managed
+/// socket (`herdr-termhost-<pid>.sock`) lands in a path the test can locate.
+fn spawn_server_managed(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    api_socket_path: &PathBuf,
+    daemon_bin: &str,
+    tmpdir: &PathBuf,
+) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    fs::create_dir_all(tmpdir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(config_home.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("server");
+    cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("TMPDIR", tmpdir); // controls std::env::temp_dir() → managed socket location
+    cmd.env("HERDR_SOCKET_PATH", api_socket_path);
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+    // Managed mode: give herdr the daemon binary, not a pre-existing socket.
+    cmd.env_remove("HERDR_TERMHOST_SOCKET");
+    cmd.env("HERDR_TERMHOST_BIN", daemon_bin);
+
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    drop(pair.slave);
+
+    SpawnedHerdr { _master: Some(pair.master), child }
+}
+
 fn send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) -> Value {
     let mut stream = UnixStream::connect(socket_path).expect("should connect to API socket");
     let request = json!({ "id": id, "method": method, "params": params });
@@ -296,6 +337,79 @@ fn termhost_pane_renders_shell_output_to_client() {
     );
 
     drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn termhost_managed_daemon_spawns_and_is_supervised() {
+    let _lock = test_lock();
+
+    // Skip unless told where the Go termhost binary is.
+    let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP termhost managed: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            return;
+        }
+    };
+    if !Path::new(&daemon_bin).exists() {
+        eprintln!("SKIP termhost managed: HERDR_TERMHOST_BIN {daemon_bin} not found");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let tmpdir = base.join("tmp");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned =
+        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
+    let herdr_pid = spawned.child.process_id();
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    // Create a workspace → herdr lazily spawns the managed daemon for the root pane.
+    let create =
+        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "managed" }));
+    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
+        .to_string();
+
+    let _ = pane_id;
+
+    // The managed socket (named by herdr's pid in TMPDIR) appears once herdr spawns
+    // the daemon for the pane — proof the orchestrator launched and connected to a
+    // daemon it manages (the socket path is one only herdr knows, from the binary +
+    // pid). This is the lifecycle contract this test owns; the per-pane render path
+    // is covered by the other e2e tests.
+    let managed_socket = herdr_pid
+        .map(|pid| tmpdir.join(format!("herdr-termhost-{pid}.sock")))
+        .expect("herdr child should report a pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !managed_socket.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        managed_socket.exists(),
+        "herdr should have spawned a managed daemon at {managed_socket:?} after pane creation"
+    );
+
+    // Supervision backstop: kill herdr; the daemon's --exit-on-disconnect must make
+    // it exit and remove its socket, so no orphaned daemon lingers.
+    drop(spawned); // SIGKILLs herdr — no graceful shutdown() runs, exercising the backstop
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && managed_socket.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !managed_socket.exists(),
+        "daemon should exit and remove its socket after the orchestrator dies, but {managed_socket:?} remains"
+    );
+
     cleanup_test_base(&base);
 }
 

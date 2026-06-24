@@ -737,6 +737,10 @@ fn main() -> io::Result<()> {
     // Shut down runtime immediately — kills lingering PTY reader/writer tasks
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
 
+    // Tear down a termhost daemon we spawned (no-op otherwise).
+    #[cfg(feature = "termhost")]
+    crate::termhost::shutdown();
+
     logging::shutdown("app");
     result
 }
