@@ -260,10 +260,25 @@ fn termhost_pane_renders_shell_output_to_client() {
     // Create a workspace; its root pane spawns on the Go termhost backend.
     let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "e2e" }));
     assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let workspace_id = create["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workspace.create should return workspace.workspace_id: {create}"))
+        .to_string();
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap_or_else(|| panic!("workspace.create should return root_pane.pane_id: {create}"))
         .to_string();
+
+    // The server auto-creates a default workspace, so the one we just created is NOT
+    // the focused/displayed one. A client renders the *focused* workspace, so focus
+    // ours before driving input or its frames won't reach the client.
+    let focus = send_json_request(
+        &api_socket,
+        "focus",
+        "workspace.focus",
+        json!({ "workspace_id": workspace_id }),
+    );
+    assert!(focus.get("error").is_none(), "workspace.focus failed: {focus}");
 
     // Attach a client to receive rendered frames for the active workspace.
     let mut stream =
