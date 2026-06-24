@@ -106,6 +106,39 @@ impl PaneGrid {
         self.has_frame = true;
     }
 
+    /// Resolves the OSC 8 hyperlinks in the accumulated grid within the
+    /// `width`×`height` window at screen origin (`origin_x`, `origin_y`), as
+    /// `((screen_x, screen_y), cell_symbol, uri)` per linked cell — matching the
+    /// in-process emulator's shape so the native-TUI click resolver works.
+    fn visible_hyperlinks(
+        &self,
+        origin_x: u16,
+        origin_y: u16,
+        width: u16,
+        height: u16,
+    ) -> Vec<((u16, u16), String, String)> {
+        if self.hyperlinks.is_empty() {
+            return Vec::new();
+        }
+        let cols = self.cols;
+        let mut links = Vec::new();
+        for y in 0..height.min(self.rows) {
+            for x in 0..width.min(cols) {
+                let idx = y as usize * cols as usize + x as usize;
+                let Some(cell) = self.cells.get(idx) else { continue };
+                let Some(h) = cell.hyperlink else { continue };
+                if let Some(uri) = self.hyperlinks.get(h as usize) {
+                    links.push((
+                        (origin_x + x, origin_y + y),
+                        cell.symbol.clone(),
+                        uri.clone(),
+                    ));
+                }
+            }
+        }
+        links
+    }
+
     fn snapshot(&self) -> Option<wire::FrameData> {
         if !self.has_frame {
             return None;
@@ -326,6 +359,26 @@ impl TermhostPane {
         self.state.grid.lock().unwrap().scroll
     }
 
+    /// Resolves the OSC 8 hyperlinks visible in the accumulated grid, within the
+    /// `width`×`height` window at screen origin (`origin_x`, `origin_y`). Returns
+    /// `((screen_x, screen_y), cell_symbol, uri)` per linked cell — the same shape
+    /// the in-process emulator produces, so the native-TUI click resolver works for
+    /// termhost panes (whose local emulator is unfed). The Go frame already carries
+    /// the per-cell link index and the URI table.
+    pub fn visible_hyperlinks(
+        &self,
+        origin_x: u16,
+        origin_y: u16,
+        width: u16,
+        height: u16,
+    ) -> Vec<((u16, u16), String, String)> {
+        self.state
+            .grid
+            .lock()
+            .unwrap()
+            .visible_hyperlinks(origin_x, origin_y, width, height)
+    }
+
     /// Extracts the text of the selection bounded by the two screen-buffer
     /// endpoints, blocking until the Go backend (which owns the fed emulator)
     /// replies. The local emulator is unfed for termhost panes, so this round-trip
@@ -463,5 +516,77 @@ mod tests {
 
         daemon.join().unwrap();
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn cell(symbol: &str, hyperlink: Option<u32>) -> wire::CellData {
+        wire::CellData {
+            symbol: symbol.to_string(),
+            fg: 0,
+            bg: 0,
+            modifier: 0,
+            skip: false,
+            hyperlink,
+        }
+    }
+
+    #[test]
+    fn grid_visible_hyperlinks_maps_cells_to_screen_and_uri() {
+        // 3x2 grid: row 0 = "l k x" with l,k linked to URI 0; row 1 has no links.
+        let mut grid = PaneGrid::default();
+        grid.apply(proto::Frame {
+            cols: 3,
+            rows: 2,
+            full: true,
+            cursor: None,
+            cells: vec![
+                cell("l", Some(0)),
+                cell("k", Some(0)),
+                cell("x", None),
+                cell(" ", None),
+                cell(" ", None),
+                cell(" ", None),
+            ],
+            hyperlinks: vec!["https://example.com".to_string()],
+            scroll: None,
+        });
+
+        // Origin (5, 2): screen coords are offset by the pane's inner-rect origin.
+        let links = grid.visible_hyperlinks(5, 2, 3, 2);
+        assert_eq!(
+            links,
+            vec![
+                ((5, 2), "l".to_string(), "https://example.com".to_string()),
+                ((6, 2), "k".to_string(), "https://example.com".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_visible_hyperlinks_clips_to_window_and_empty_table() {
+        let mut grid = PaneGrid::default();
+        // A linked cell at column 2, but a 2-wide window excludes it.
+        grid.apply(proto::Frame {
+            cols: 3,
+            rows: 1,
+            full: true,
+            cursor: None,
+            cells: vec![cell("a", None), cell("b", None), cell("c", Some(0))],
+            hyperlinks: vec!["https://x".to_string()],
+            scroll: None,
+        });
+        assert!(grid.visible_hyperlinks(0, 0, 2, 1).is_empty());
+
+        // No link table ⇒ nothing, even if a stale index were present.
+        let mut bare = PaneGrid::default();
+        bare.apply(proto::Frame {
+            cols: 1,
+            rows: 1,
+            full: true,
+            cursor: None,
+            cells: vec![cell("a", None)],
+            hyperlinks: vec![],
+            scroll: None,
+        });
+        assert!(bare.visible_hyperlinks(0, 0, 1, 1).is_empty());
     }
 }

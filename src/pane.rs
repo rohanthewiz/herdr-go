@@ -2661,6 +2661,12 @@ impl PaneRuntime {
     }
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
+        // Termhost panes keep an unfed local emulator; resolve links from the
+        // Go-fed frame grid (which carries the OSC 8 URI table) instead.
+        #[cfg(feature = "termhost")]
+        if let Some(pane) = self.io.termhost_pane() {
+            return pane.visible_hyperlinks(area.x, area.y, area.width, area.height);
+        }
         self.terminal.visible_hyperlinks(area)
     }
 
