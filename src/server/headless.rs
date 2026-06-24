@@ -3620,6 +3620,12 @@ pub fn run_server() -> io::Result<()> {
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
 
+        // Reconcile against a reconnected persistent termhost daemon: close any live
+        // shells it kept that our restored session doesn't reference (drift from a
+        // prior crash), so they don't leak until the daemon's idle timeout.
+        #[cfg(feature = "termhost")]
+        crate::termhost::close_restored_orphans();
+
         // Create the headless server.
         let mut server = match HeadlessServer::new(
             app,
@@ -3718,6 +3724,11 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         )?;
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
+        // Same reconciliation as the normal startup path: a handoff-import herdr
+        // reconnects to the surviving daemon and adopts its panes, so close any the
+        // restored session doesn't reference.
+        #[cfg(feature = "termhost")]
+        crate::termhost::close_restored_orphans();
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(

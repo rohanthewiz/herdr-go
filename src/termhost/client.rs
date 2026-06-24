@@ -357,6 +357,29 @@ impl TermhostClient {
         &self.surviving_panes
     }
 
+    /// Closes any surviving daemon pane this herdr did NOT adopt or create during
+    /// restore — a live shell the daemon kept (e.g. a pane spawned just before the
+    /// previous herdr crashed, before its session was saved) that our restored
+    /// session doesn't reference, and which would otherwise leak until the daemon's
+    /// idle timeout. Call once, after restore. Returns how many were closed.
+    pub fn close_orphans(&self) -> usize {
+        let orphans: Vec<u32> = {
+            let known = self.panes.lock().unwrap();
+            self.surviving_panes
+                .iter()
+                .copied()
+                .filter(|id| !known.contains_key(id))
+                .collect()
+        };
+        let mut closed = 0;
+        for id in orphans {
+            if self.send(&Command::ClosePane { pane_id: id }).is_ok() {
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     /// Adopts a pane that already exists in the daemon (a survivor of a herdr
     /// restart/handoff): registers client-side state + signal sink WITHOUT sending
     /// CreatePane, then requests a resync so the pane repaints with its current
@@ -643,6 +666,49 @@ mod tests {
 
         let text = pane.extract_selection_blocking(0, 0, 0, 4, false);
         assert_eq!(text, Some("HELLO".to_string()));
+
+        daemon.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // On reconnect the daemon reports its surviving panes in welcome.panes. After
+    // restore adopts the ones the session references, close_orphans must close exactly
+    // the rest (live shells the session no longer tracks) and leave adopted panes alone.
+    #[test]
+    fn close_orphans_closes_only_unadopted_survivors() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("herdr-th-orphan-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let daemon = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let _hello = read_frame(&mut conn);
+            // Reconnect: the daemon already has panes 1, 2, 3 live.
+            write_frame(
+                &mut conn,
+                r#"{"type":"welcome","protocol_version":1,"panes":[1,2,3]}"#,
+            );
+            let _resync = read_frame(&mut conn); // request_resync for the adopted pane (2)
+            // close_orphans should now close 1 and 3 (not the adopted 2), in order.
+            let mut closed = Vec::new();
+            for _ in 0..2 {
+                let cmd: serde_json::Value =
+                    serde_json::from_slice(&read_frame(&mut conn)).unwrap();
+                assert_eq!(cmd["type"], "close_pane");
+                closed.push(cmd["pane_id"].as_u64().unwrap());
+            }
+            closed.sort_unstable();
+            assert_eq!(closed, vec![1, 3]);
+        });
+
+        let client = TermhostClient::connect(path.to_str().unwrap()).unwrap();
+        assert_eq!(client.surviving_panes(), &[1, 2, 3]);
+        // Adopt only pane 2 (the one the restored session references).
+        let _adopted = client.adopt_pane(2, None).unwrap();
+
+        let closed = client.close_orphans();
+        assert_eq!(closed, 2, "panes 1 and 3 are orphans");
 
         daemon.join().unwrap();
         let _ = std::fs::remove_file(&path);

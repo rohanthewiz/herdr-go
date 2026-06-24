@@ -58,6 +58,21 @@ pub(crate) fn client_if_enabled() -> Option<Arc<TermhostClient>> {
     CLIENT.get_or_init(connect_backend).clone()
 }
 
+/// After session restore, close any termhost pane the (reconnected) persistent daemon
+/// still has that this herdr didn't adopt or create — a live shell our restored
+/// session doesn't reference (drift from a prior crash), which would otherwise leak
+/// until the daemon's idle timeout. Peeks the already-initialized client only: if the
+/// backend was never used this run there's nothing to reconcile (and we don't force a
+/// connect just to check).
+pub(crate) fn close_restored_orphans() {
+    if let Some(Some(client)) = CLIENT.get() {
+        let closed = client.close_orphans();
+        if closed > 0 {
+            tracing::info!(closed, "closed orphaned termhost panes after restore");
+        }
+    }
+}
+
 fn connect_backend() -> Option<Arc<TermhostClient>> {
     // Dev/manual: attach to a hand-launched daemon at a known socket.
     if let Some(path) = std::env::var(SOCKET_ENV_VAR).ok().filter(|p| !p.is_empty()) {
