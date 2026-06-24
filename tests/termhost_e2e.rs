@@ -355,6 +355,93 @@ fn termhost_pane_renders_shell_output_to_client() {
 }
 
 #[test]
+fn termhost_pane_survives_client_reattach() {
+    let _lock = test_lock();
+
+    let termhost_socket = match std::env::var("HERDR_TERMHOST_SOCKET") {
+        Ok(path) if !path.is_empty() => path,
+        _ => {
+            eprintln!("SKIP termhost reattach: HERDR_TERMHOST_SOCKET unset");
+            return;
+        }
+    };
+    if UnixStream::connect(&termhost_socket).is_err() {
+        eprintln!("SKIP termhost reattach: no daemon reachable at {termhost_socket}");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &termhost_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let create =
+        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "reattach" }));
+    let workspace_id = create["result"]["workspace"]["workspace_id"].as_str().unwrap().to_string();
+    let pane_id = create["result"]["root_pane"]["pane_id"].as_str().unwrap().to_string();
+    let focus = send_json_request(
+        &api_socket,
+        "focus",
+        "workspace.focus",
+        json!({ "workspace_id": workspace_id }),
+    );
+    assert!(focus.get("error").is_none(), "workspace.focus failed: {focus}");
+
+    // Client 1: drive a first marker, then detach (drop the socket).
+    {
+        let mut c1 = UnixStream::connect(&client_socket).expect("connect client 1");
+        client_handshake(&mut c1, 13, 80, 24).expect("handshake 1");
+        let m1 = "reattach_before_42";
+        send_json_request(
+            &api_socket,
+            "s1",
+            "pane.send_text",
+            json!({ "pane_id": pane_id, "text": format!("echo {m1}\n") }),
+        );
+        assert!(
+            wait_for_rendered_text(&mut c1, m1, Duration::from_secs(15)),
+            "client 1 should see '{m1}'"
+        );
+    } // c1 dropped — the TUI client detaches; the server (and its daemon) keep running.
+
+    // Client 2 reattaches: the same pane/shell must still be alive — its scrollback
+    // still holds the first marker, and a new command runs in the same shell.
+    let mut c2 = UnixStream::connect(&client_socket).expect("connect client 2");
+    client_handshake(&mut c2, 13, 80, 24).expect("handshake 2");
+    let m2 = "reattach_after_99";
+    send_json_request(
+        &api_socket,
+        "s2",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("echo {m2}\n") }),
+    );
+    assert!(
+        wait_for_rendered_text(&mut c2, m2, Duration::from_secs(15)),
+        "reattached client should see '{m2}' — the termhost pane/shell survived client detach"
+    );
+    // The pane's buffer still holds the pre-detach output (read over the seam).
+    let read = send_json_request(
+        &api_socket,
+        "read",
+        "pane.read",
+        json!({ "pane_id": pane_id, "source": "recent", "lines": 200 }),
+    );
+    let read_text = read["result"]["read"]["text"].as_str().unwrap_or_default();
+    assert!(
+        read_text.contains("reattach_before_42"),
+        "pre-detach output should survive in the same pane; got {read_text:?}"
+    );
+
+    drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn termhost_managed_daemon_spawns_and_is_supervised() {
     let _lock = test_lock();
 

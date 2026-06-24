@@ -205,6 +205,8 @@ pub struct PaneSpec {
     pub command: String,
     pub args: Vec<String>,
     pub env: std::collections::BTreeMap<String, String>,
+    /// VT-encoded scrollback to seed before the child runs (restored history).
+    pub initial_history: String,
 }
 
 impl TermhostClient {
@@ -368,6 +370,7 @@ impl TermhostClient {
             command: spec.command,
             args: spec.args,
             env: spec.env,
+            initial_history: spec.initial_history,
         })?;
 
         Ok(TermhostPane { client: self.clone(), id: spec.pane_id, state })

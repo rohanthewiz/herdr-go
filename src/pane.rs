@@ -1792,6 +1792,7 @@ impl PaneRuntime {
                 cmd,
                 client,
                 events,
+                initial_state.history_ansi,
             );
         }
 
@@ -2285,6 +2286,7 @@ impl PaneRuntime {
         cmd: CommandBuilder,
         client: Arc<crate::termhost::TermhostClient>,
         events: mpsc::Sender<AppEvent>,
+        initial_history: Option<&str>,
     ) -> std::io::Result<Self> {
         use crate::termhost::{PaneSpec, TerminalBackend};
 
@@ -2383,6 +2385,7 @@ impl PaneRuntime {
                     command,
                     args,
                     env,
+                    initial_history: initial_history.unwrap_or_default().to_string(),
                 },
                 Some(signal_sink),
             )

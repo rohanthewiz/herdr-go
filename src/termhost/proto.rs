@@ -41,6 +41,10 @@ pub enum Command {
         args: Vec<String>,
         #[serde(skip_serializing_if = "BTreeMap::is_empty")]
         env: BTreeMap<String, String>,
+        /// VT-encoded scrollback to seed before the child's first output (restored
+        /// session history). Empty for a fresh pane.
+        #[serde(skip_serializing_if = "String::is_empty")]
+        initial_history: String,
     },
     Input {
         pane_id: u32,
@@ -307,10 +311,30 @@ mod tests {
             command: String::new(),
             args: vec![],
             env: BTreeMap::new(),
+            initial_history: String::new(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"create_pane""#), "{json}");
         assert!(!json.contains("cwd") && !json.contains("command"), "{json}");
+        assert!(!json.contains("initial_history"), "{json}");
+    }
+
+    #[test]
+    fn create_pane_carries_initial_history_when_set() {
+        let cmd = Command::CreatePane {
+            pane_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            cwd: String::new(),
+            command: String::new(),
+            args: vec![],
+            env: BTreeMap::new(),
+            initial_history: "line1\r\nline2\r\n".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""initial_history":"line1\r\nline2\r\n""#), "{json}");
     }
 
     #[test]
