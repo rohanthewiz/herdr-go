@@ -190,6 +190,11 @@ impl PaneTerminal {
         self.ghostty.input_state()
     }
 
+    #[cfg(feature = "termhost")]
+    pub fn apply_input_modes(&self, modes: &crate::termhost::PaneInputModes) {
+        self.ghostty.apply_input_modes(modes);
+    }
+
     pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
         self.ghostty.wheel_routing()
     }
@@ -734,6 +739,79 @@ impl GhosttyPaneTerminal {
         if input_state.modify_other_keys {
             core.terminal.write(b"\x1b[>4;2m");
         }
+
+        if let Ok(mut key_encoder) = self.key_encoder.lock() {
+            key_encoder.set_from_terminal(&core.terminal);
+        }
+    }
+
+    /// Mirrors the Go backend's reported input modes onto this (unfed) local
+    /// emulator so the key/mouse encoders and the input_state/wheel_routing queries
+    /// — all of which read this emulator — match the program running on the daemon.
+    /// Idempotent: safe to call on every reported change. Unlike
+    /// [`Self::seed_handoff_input_state`] it switches the alternate screen in both
+    /// directions and sets the kitty keyboard flags absolutely (no stack growth).
+    #[cfg(feature = "termhost")]
+    pub fn apply_input_modes(&self, modes: &crate::termhost::PaneInputModes) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+
+        let is_alt = core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate);
+        if modes.alternate_screen && !is_alt {
+            core.terminal.write(b"\x1b[?1049h");
+        } else if !modes.alternate_screen && is_alt {
+            core.terminal.write(b"\x1b[?1049l");
+        }
+
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_APPLICATION_CURSOR_KEYS,
+            modes.application_cursor,
+        );
+        let _ = core
+            .terminal
+            .mode_set(crate::ghostty::MODE_BRACKETED_PASTE, modes.bracketed_paste);
+        let _ = core
+            .terminal
+            .mode_set(crate::ghostty::MODE_FOCUS_EVENT, modes.focus_reporting);
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL,
+            modes.mouse_alternate_scroll,
+        );
+        let _ = core.terminal.mode_set(
+            crate::ghostty::MODE_SYNCHRONIZED_OUTPUT,
+            modes.synchronized_output,
+        );
+
+        // Mouse tracking + encoding are fed as the program's own escape sequences
+        // (CSI ? Pn h/l) rather than mode_set: the libghostty MouseEncoder reads its
+        // tracking state from the sequence path, not the mode bit that mode_get sees.
+        core.terminal.write(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l"); // clear all tracking
+        // Wire codes: 1 x10, 2 press+release, 3 button-motion, 4 any-motion.
+        let mouse_set: &[u8] = match modes.mouse_mode {
+            1 => b"\x1b[?9h",
+            2 => b"\x1b[?1000h",
+            3 => b"\x1b[?1002h",
+            4 => b"\x1b[?1003h",
+            _ => b"",
+        };
+        if !mouse_set.is_empty() {
+            core.terminal.write(mouse_set);
+        }
+        core.terminal.write(b"\x1b[?1005l\x1b[?1006l"); // clear encoding
+        let enc_set: &[u8] = match modes.mouse_encoding {
+            1 => b"\x1b[?1005h", // utf8
+            2 => b"\x1b[?1006h", // sgr
+            _ => b"",
+        };
+        if !enc_set.is_empty() {
+            core.terminal.write(enc_set);
+        }
+
+        // Kitty keyboard: set the flags register absolutely (CSI = flags ; 1 u), so
+        // repeated applies don't grow the protocol stack the way push (CSI > u) would.
+        core.terminal
+            .write(format!("\x1b[={};1u", modes.kitty_keyboard_flags).as_bytes());
 
         if let Ok(mut key_encoder) = self.key_encoder.lock() {
             key_encoder.set_from_terminal(&core.terminal);
@@ -2485,6 +2563,57 @@ mod tests {
         let key = crate::input::parse_terminal_key_sequence("\x1b[13;2u").unwrap();
         let encoded = pane.encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy);
         assert_eq!(encoded, b"\x1b[27;2;13~");
+    }
+
+    #[cfg(all(unix, feature = "termhost"))]
+    #[test]
+    fn ghostty_apply_input_modes_mirrors_program_modes() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        // Program enabled SGR any-motion mouse + bracketed paste + focus.
+        pane.apply_input_modes(&crate::termhost::PaneInputModes {
+            alternate_screen: false,
+            application_cursor: true,
+            bracketed_paste: true,
+            focus_reporting: true,
+            mouse_mode: 4,     // any-motion
+            mouse_encoding: 2, // sgr
+            mouse_alternate_scroll: false,
+            synchronized_output: false,
+            kitty_keyboard_flags: 0,
+        });
+
+        let state = pane.input_state().expect("input_state");
+        assert!(state.bracketed_paste && state.focus_reporting && state.application_cursor);
+        assert_eq!(state.mouse_protocol_mode, crate::input::MouseProtocolMode::AnyMotion);
+        assert_eq!(state.mouse_protocol_encoding, crate::input::MouseProtocolEncoding::Sgr);
+
+        // The encoders read the same emulator, so mouse reporting now produces SGR.
+        let bytes = pane
+            .encode_mouse_button(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+                0,
+                crossterm::event::KeyModifiers::empty(),
+            )
+            .expect("mouse reporting enabled → Some bytes");
+        assert!(bytes.starts_with(b"\x1b[<"), "SGR mouse report, got {bytes:?}");
+
+        // Program disabled tracking → reporting off, encoder declines.
+        pane.apply_input_modes(&crate::termhost::PaneInputModes::default());
+        let state = pane.input_state().expect("input_state");
+        assert_eq!(state.mouse_protocol_mode, crate::input::MouseProtocolMode::None);
+        assert!(!state.bracketed_paste);
+        assert!(pane
+            .encode_mouse_button(
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                0,
+                0,
+                crossterm::event::KeyModifiers::empty(),
+            )
+            .is_none());
     }
 
     #[test]

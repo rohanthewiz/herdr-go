@@ -34,6 +34,24 @@ pub enum PaneSignal {
     Clipboard(Vec<u8>),
     /// Window title reported via OSC 0/2 (empty is a title-clear).
     Title(String),
+    /// Input-affecting DEC modes changed; the owner mirrors them onto its local
+    /// emulator so key/mouse encoding and input routing match the program.
+    Modes(PaneInputModes),
+}
+
+/// The pane's input-affecting DEC mode state, as reported by the Go backend.
+/// `mouse_mode`/`mouse_encoding` are the raw wire codes (see [`proto::Event::PaneModes`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaneInputModes {
+    pub alternate_screen: bool,
+    pub application_cursor: bool,
+    pub bracketed_paste: bool,
+    pub focus_reporting: bool,
+    pub mouse_mode: u8,
+    pub mouse_encoding: u8,
+    pub mouse_alternate_scroll: bool,
+    pub synchronized_output: bool,
+    pub kitty_keyboard_flags: u16,
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -271,6 +289,34 @@ impl TermhostClient {
                     // Take the slot so a late/duplicate reply has nowhere to go.
                     if let Some(tx) = pane.pending_selection.lock().unwrap().take() {
                         let _ = tx.send(text);
+                    }
+                }
+            }
+            Event::PaneModes {
+                pane_id,
+                alternate_screen,
+                application_cursor,
+                bracketed_paste,
+                focus_reporting,
+                mouse_mode,
+                mouse_encoding,
+                mouse_alternate_scroll,
+                synchronized_output,
+                kitty_keyboard_flags,
+            } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(sink) = &pane.sink {
+                        sink(PaneSignal::Modes(PaneInputModes {
+                            alternate_screen,
+                            application_cursor,
+                            bracketed_paste,
+                            focus_reporting,
+                            mouse_mode,
+                            mouse_encoding,
+                            mouse_alternate_scroll,
+                            synchronized_output,
+                            kitty_keyboard_flags,
+                        }));
                     }
                 }
             }

@@ -139,6 +139,33 @@ pub enum Event {
         #[serde(default)]
         text: String,
     },
+    PaneModes {
+        pane_id: u32,
+        /// The pane's input-affecting DEC mode state (mouse tracking, bracketed
+        /// paste, focus, application cursor, alt-scroll, sync output, kitty keyboard).
+        /// The orchestrator mirrors these onto its (unfed) local emulator so its
+        /// key/mouse encoders and UI-vs-program input routing match the program.
+        #[serde(default)]
+        alternate_screen: bool,
+        #[serde(default)]
+        application_cursor: bool,
+        #[serde(default)]
+        bracketed_paste: bool,
+        #[serde(default)]
+        focus_reporting: bool,
+        /// 0 none, 1 x10, 2 press+release, 3 button-motion, 4 any-motion.
+        #[serde(default)]
+        mouse_mode: u8,
+        /// 0 default, 1 utf8, 2 sgr.
+        #[serde(default)]
+        mouse_encoding: u8,
+        #[serde(default)]
+        mouse_alternate_scroll: bool,
+        #[serde(default)]
+        synchronized_output: bool,
+        #[serde(default)]
+        kitty_keyboard_flags: u16,
+    },
     PaneExited {
         pane_id: u32,
         exit_code: i32,
@@ -430,6 +457,31 @@ mod tests {
             Event::PaneSelection { pane_id, text } => {
                 assert_eq!(pane_id, 4);
                 assert!(text.is_empty());
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_modes_decodes() {
+        let raw = r#"{"type":"pane_modes","pane_id":12,"bracketed_paste":true,"mouse_mode":4,"mouse_encoding":2,"kitty_keyboard_flags":5}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        match ev {
+            Event::PaneModes {
+                pane_id,
+                bracketed_paste,
+                mouse_mode,
+                mouse_encoding,
+                kitty_keyboard_flags,
+                focus_reporting,
+                ..
+            } => {
+                assert_eq!(pane_id, 12);
+                assert!(bracketed_paste);
+                assert_eq!(mouse_mode, 4);
+                assert_eq!(mouse_encoding, 2);
+                assert_eq!(kitty_keyboard_flags, 5);
+                assert!(!focus_reporting); // omitted → default false
             }
             other => panic!("wrong event: {other:?}"),
         }

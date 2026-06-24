@@ -2316,6 +2316,8 @@ impl PaneRuntime {
         let signal_sink: crate::termhost::SignalSink = {
             let reported_cwd = reported_cwd.clone();
             let events = events.clone();
+            let modes_terminal = terminal.clone();
+            let modes_kitty_flags = kitty_keyboard_flags.clone();
             Box::new(move |signal| match signal {
                 crate::termhost::PaneSignal::Cwd(cwd) => {
                     publish_reported_cwd(
@@ -2359,6 +2361,12 @@ impl PaneRuntime {
                         pane_id,
                         title: (!title.is_empty()).then_some(title),
                     });
+                }
+                crate::termhost::PaneSignal::Modes(modes) => {
+                    // Mirror the program's input modes onto the (unfed) local emulator
+                    // so its key/mouse encoders and input routing match the program.
+                    modes_terminal.apply_input_modes(&modes);
+                    modes_kitty_flags.store(modes.kitty_keyboard_flags, Ordering::Relaxed);
                 }
             })
         };

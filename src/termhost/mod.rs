@@ -13,7 +13,7 @@
 mod client;
 mod proto;
 
-pub use client::{PaneSignal, PaneSpec, SignalSink, TermhostClient, TermhostPane};
+pub use client::{PaneInputModes, PaneSignal, PaneSpec, SignalSink, TermhostClient, TermhostPane};
 
 use crate::protocol as wire;
 use std::path::PathBuf;
