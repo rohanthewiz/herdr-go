@@ -10,8 +10,8 @@
 //! attaches as a client, drives `echo <marker>` into the pane, and asserts the
 //! marker shows up in a rendered frame. The frame's cells originate from the Go
 //! emulator, so this exercises create_pane -> input -> frame across the seam and
-//! the step-3 render path. (Note: `pane.read` reads the local, unfed emulator for
-//! termhost panes, so the assertion goes through the rendered client frame.)
+//! the step-3 render path. `pane.read` for a termhost pane is served from the Go
+//! backend over the seam (request_text), so it returns the program's output too.
 #![cfg(feature = "termhost")]
 
 mod support;
@@ -304,22 +304,21 @@ fn termhost_pane_renders_shell_output_to_client() {
         "termhost-backed pane should render '{marker}' (typed echo and/or its output) in a frame"
     );
 
-    // Definitive proof this went through the Go backend (not an in-process
-    // fallback): for a termhost pane the local Rust emulator is unfed, so
-    // `pane.read` (which reads that local emulator) must NOT contain the marker
-    // even though the rendered frame does. An in-process pane would show it here.
-    let local_read = send_json_request(
+    // Text extraction parity: pane.read for a termhost pane goes through the seam
+    // (request_text → the Go backend's buffer), since the local Rust emulator is
+    // unfed. So the marker the program printed must come back here too — proving the
+    // Go side served the read, not a (degraded) empty local emulator.
+    let read = send_json_request(
         &api_socket,
         "read",
         "pane.read",
         json!({ "pane_id": pane_id, "source": "recent", "lines": 200 }),
     );
-    let local_text = local_read["result"]["read"]["text"].as_str().unwrap_or_default();
-    eprintln!("termhost_e2e: pane.read (local emulator) len={}", local_text.len());
+    let read_text = read["result"]["read"]["text"].as_str().unwrap_or_default();
+    eprintln!("termhost_e2e: pane.read (via seam) len={}", read_text.len());
     assert!(
-        !local_text.contains(marker),
-        "termhost pane's local emulator should be unfed (degraded), but pane.read contained '{marker}' \
-         — the pane is NOT termhost-backed (in-process fallback?)"
+        read_text.contains(marker),
+        "pane.read should return the Go backend's buffer for a termhost pane, but '{marker}' was missing; got {read_text:?}"
     );
 
     // OSC 7 passthrough: make the shell emit a working-directory report and assert

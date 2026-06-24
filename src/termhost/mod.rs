@@ -14,6 +14,7 @@ mod client;
 mod proto;
 
 pub use client::{PaneInputModes, PaneSignal, PaneSpec, SignalSink, TermhostClient, TermhostPane};
+pub use proto::{TEXT_SCOPE_RECENT, TEXT_SCOPE_VISIBLE};
 
 use crate::protocol as wire;
 use std::path::PathBuf;

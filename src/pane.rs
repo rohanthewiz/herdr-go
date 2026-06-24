@@ -2594,15 +2594,39 @@ impl PaneRuntime {
         self.terminal.synchronized_output_active()
     }
 
+    /// For a termhost pane, reads buffer text from the Go backend (the local
+    /// emulator is unfed); `None` for in-process panes or on failure. `lines`
+    /// saturates to u32 — usize::MAX (snapshot_history) lands above the buffer size,
+    /// which the Go side reads as "whole buffer".
+    #[cfg(feature = "termhost")]
+    fn termhost_text(&self, scope: u8, lines: usize, ansi: bool, unwrap: bool) -> Option<String> {
+        let pane = self.io.termhost_pane()?;
+        pane.extract_text_blocking(scope, lines.min(u32::MAX as usize) as u32, ansi, unwrap)
+    }
+
     pub fn visible_text(&self) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, false, false) {
+            return t;
+        }
         self.terminal.visible_text()
     }
 
     pub fn visible_ansi(&self) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, true, false) {
+            return t;
+        }
         self.terminal.visible_ansi()
     }
 
     pub fn detection_text(&self) -> String {
+        // Go owns detection for termhost panes; this read-API source maps to the
+        // visible screen text.
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, false, false) {
+            return t;
+        }
         self.terminal.detection_text()
     }
 
@@ -2615,18 +2639,34 @@ impl PaneRuntime {
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, false, false) {
+            return t;
+        }
         self.terminal.recent_text(lines)
     }
 
     pub fn recent_ansi(&self, lines: usize) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, true, false) {
+            return t;
+        }
         self.terminal.recent_ansi(lines)
     }
 
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, false, true) {
+            return t;
+        }
         self.terminal.recent_unwrapped_text(lines)
     }
 
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
+        #[cfg(feature = "termhost")]
+        if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, true, true) {
+            return t;
+        }
         self.terminal.recent_unwrapped_ansi(lines)
     }
 

@@ -70,6 +70,9 @@ struct PaneState {
     /// requests are issued one at a time from the UI thread (which then blocks on
     /// the reply), so a single slot is enough and replies are FIFO over the socket.
     pending_selection: Mutex<Option<mpsc::Sender<String>>>,
+    /// One-shot for an in-flight blocking text-extraction request (pane_text reply).
+    /// Same single-outstanding/FIFO reasoning as pending_selection.
+    pending_text: Mutex<Option<mpsc::Sender<String>>>,
 }
 
 /// Accumulated full grid for one pane. Go sends the full grid each frame with
@@ -292,6 +295,13 @@ impl TermhostClient {
                     }
                 }
             }
+            Event::PaneText { pane_id, text } => {
+                if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
+                    if let Some(tx) = pane.pending_text.lock().unwrap().take() {
+                        let _ = tx.send(text);
+                    }
+                }
+            }
             Event::PaneModes {
                 pane_id,
                 alternate_screen,
@@ -344,6 +354,7 @@ impl TermhostClient {
             exit: Mutex::new(None),
             sink,
             pending_selection: Mutex::new(None),
+            pending_text: Mutex::new(None),
         });
         self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
 
@@ -458,7 +469,7 @@ impl TermhostPane {
             return None;
         }
 
-        match rx.recv_timeout(SELECTION_REPLY_TIMEOUT) {
+        match rx.recv_timeout(SEAM_REPLY_TIMEOUT) {
             Ok(text) => Some(text),
             Err(_) => {
                 // Timed out or the backend is gone: drop the stale waiter.
@@ -467,12 +478,41 @@ impl TermhostPane {
             }
         }
     }
+
+    /// Extracts buffer text from the backend, blocking until the pane_text reply.
+    /// `scope` is [`proto::TEXT_SCOPE_VISIBLE`]/[`proto::TEXT_SCOPE_RECENT`]; `lines`
+    /// bounds the recent scope (0 = whole buffer); `ansi`/`unwrap` select VT and
+    /// soft-wrap rejoining. Returns `None` on send failure or timeout. The local
+    /// emulator is unfed for termhost panes, so this round-trip is the only way to
+    /// read their text.
+    pub fn extract_text_blocking(&self, scope: u8, lines: u32, ansi: bool, unwrap: bool) -> Option<String> {
+        let (tx, rx) = mpsc::channel();
+        *self.state.pending_text.lock().unwrap() = Some(tx);
+
+        if self
+            .client
+            .send(&Command::RequestText { pane_id: self.id, scope, lines, ansi, unwrap })
+            .is_err()
+        {
+            *self.state.pending_text.lock().unwrap() = None;
+            return None;
+        }
+
+        match rx.recv_timeout(SEAM_REPLY_TIMEOUT) {
+            Ok(text) => Some(text),
+            Err(_) => {
+                *self.state.pending_text.lock().unwrap() = None;
+                None
+            }
+        }
+    }
 }
 
-/// Upper bound on a blocking selection round-trip. The backend formats under its
-/// per-pane emulator lock, so a reply is normally sub-millisecond over the local
-/// socket; this only guards against a wedged or dead daemon hanging the UI thread.
-const SELECTION_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
+/// Upper bound on a blocking request/response round-trip (selection, text). The
+/// backend formats under its per-pane emulator lock, so a reply is normally
+/// sub-millisecond over the local socket; this only guards against a wedged or dead
+/// daemon hanging the UI thread.
+const SEAM_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl TerminalBackend for TermhostPane {
     fn write_input(&self, bytes: &[u8]) {
@@ -559,6 +599,39 @@ mod tests {
 
         let text = pane.extract_selection_blocking(0, 0, 0, 4, false);
         assert_eq!(text, Some("HELLO".to_string()));
+
+        daemon.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extract_text_blocking_round_trips() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("herdr-th-text-test-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let daemon = thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let _hello = read_frame(&mut conn);
+            write_frame(&mut conn, r#"{"type":"welcome","protocol_version":1}"#);
+            let _create = read_frame(&mut conn);
+            let req = read_frame(&mut conn);
+            let req: serde_json::Value = serde_json::from_slice(&req).unwrap();
+            assert_eq!(req["type"], "request_text");
+            assert_eq!(req["scope"], 1); // recent
+            assert_eq!(req["unwrap"], true);
+            assert!(req.get("lines").is_none()); // 0 omitted → whole buffer
+            write_frame(&mut conn, r#"{"type":"pane_text","pane_id":1,"text":"row1\nrow2"}"#);
+        });
+
+        let client = TermhostClient::connect(path.to_str().unwrap()).unwrap();
+        let pane = client
+            .create_pane(PaneSpec { pane_id: 1, cols: 40, rows: 5, ..Default::default() }, None)
+            .unwrap();
+
+        let text = pane.extract_text_blocking(super::proto::TEXT_SCOPE_RECENT, 0, false, true);
+        assert_eq!(text, Some("row1\nrow2".to_string()));
 
         daemon.join().unwrap();
         let _ = std::fs::remove_file(&path);

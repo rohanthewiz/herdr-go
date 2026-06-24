@@ -74,7 +74,25 @@ pub enum Command {
         #[serde(skip_serializing_if = "is_false")]
         rectangle: bool,
     },
+    RequestText {
+        pane_id: u32,
+        /// 0 = visible viewport, 1 = recent (last `lines` of the buffer).
+        scope: u8,
+        /// Bounds the recent scope; 0 = the whole buffer. Ignored for visible.
+        #[serde(skip_serializing_if = "is_zero")]
+        lines: u32,
+        /// VT (styled escapes) vs plain text.
+        #[serde(skip_serializing_if = "is_false")]
+        ansi: bool,
+        /// Rejoin soft-wrapped lines (recent scope only).
+        #[serde(skip_serializing_if = "is_false")]
+        unwrap: bool,
+    },
 }
+
+/// Buffer scope for [`Command::RequestText`], matching Go's `terminal.TextScope`.
+pub const TEXT_SCOPE_VISIBLE: u8 = 0;
+pub const TEXT_SCOPE_RECENT: u8 = 1;
 
 /// One endpoint of a selection, in screen-buffer (absolute) coordinates: `row`
 /// counts from the top of the scrollback buffer (stable across scroll), `col` is
@@ -88,6 +106,10 @@ pub struct SelectionPoint {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Events received Go → Rust.
@@ -136,6 +158,13 @@ pub enum Event {
         /// Plain text of the requested selection (unwrapped, trailing-trimmed by the
         /// Go side). Empty means the range had no selectable content. This is the
         /// reply to a [`Command::RequestSelection`].
+        #[serde(default)]
+        text: String,
+    },
+    PaneText {
+        pane_id: u32,
+        /// Extracted buffer text (empty when the range has no content). Reply to a
+        /// [`Command::RequestText`].
         #[serde(default)]
         text: String,
     },
@@ -457,6 +486,36 @@ mod tests {
             Event::PaneSelection { pane_id, text } => {
                 assert_eq!(pane_id, 4);
                 assert!(text.is_empty());
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_text_serializes() {
+        let cmd = Command::RequestText {
+            pane_id: 7,
+            scope: TEXT_SCOPE_RECENT,
+            lines: 0,
+            ansi: false,
+            unwrap: true,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains(r#""type":"request_text""#), "{json}");
+        assert!(json.contains(r#""scope":1"#), "{json}");
+        assert!(json.contains(r#""unwrap":true"#), "{json}");
+        // Zero/false fields are omitted (match Go's omitempty).
+        assert!(!json.contains("lines") && !json.contains("ansi"), "{json}");
+    }
+
+    #[test]
+    fn pane_text_decodes() {
+        let ev: Event =
+            serde_json::from_str(r#"{"type":"pane_text","pane_id":7,"text":"row1\nrow2"}"#).unwrap();
+        match ev {
+            Event::PaneText { pane_id, text } => {
+                assert_eq!(pane_id, 7);
+                assert_eq!(text, "row1\nrow2");
             }
             other => panic!("wrong event: {other:?}"),
         }
