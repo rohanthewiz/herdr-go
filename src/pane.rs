@@ -1783,6 +1783,10 @@ impl PaneRuntime {
         // Go daemon; spawn the pane there instead of an in-process PTY.
         #[cfg(feature = "termhost")]
         if let Some(client) = crate::termhost::client_if_enabled() {
+            // If a persistent daemon survived a herdr restart/handoff and still has
+            // this pane (reported in welcome.panes), adopt the live shell instead of
+            // spawning a fresh one — that's how termhost shells survive a restart.
+            let adopt = client.surviving_panes().contains(&pane_id.raw());
             return Self::finish_termhost(
                 pane_id,
                 rows,
@@ -1793,6 +1797,7 @@ impl PaneRuntime {
                 client,
                 events,
                 initial_state.history_ansi,
+                adopt,
             );
         }
 
@@ -2287,6 +2292,7 @@ impl PaneRuntime {
         client: Arc<crate::termhost::TermhostClient>,
         events: mpsc::Sender<AppEvent>,
         initial_history: Option<&str>,
+        adopt: bool,
     ) -> std::io::Result<Self> {
         use crate::termhost::{PaneSpec, TerminalBackend};
 
@@ -2373,8 +2379,13 @@ impl PaneRuntime {
             })
         };
 
-        let pane = client
-            .create_pane(
+        // Adopt a surviving live shell (reconnect after restart/handoff) vs. spawn a
+        // fresh one. Adoption skips CreatePane (and its cwd/command/initial_history,
+        // which only seed a *new* shell) and requests a resync so the pane repaints.
+        let pane = if adopt {
+            client.adopt_pane(pane_id.raw(), Some(signal_sink))
+        } else {
+            client.create_pane(
                 PaneSpec {
                     pane_id: pane_id.raw(),
                     cols,
@@ -2389,7 +2400,8 @@ impl PaneRuntime {
                 },
                 Some(signal_sink),
             )
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        }
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
         let pane = Arc::new(pane);
 
         // Exit watcher: the client's reader thread records the exit code from the

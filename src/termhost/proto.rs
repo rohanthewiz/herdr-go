@@ -92,6 +92,16 @@ pub enum Command {
         #[serde(skip_serializing_if = "is_false")]
         unwrap: bool,
     },
+    /// Asks the daemon to replay one pane's current state (full frame plus modes,
+    /// cwd, title, agent). Sent after adopting a surviving pane on reconnect, so it
+    /// repaints deterministically without racing the daemon's post-hello replay.
+    RequestResync {
+        pane_id: u32,
+    },
+    /// Asks a persistent daemon to exit and tear down all panes. Sent on a *clean*
+    /// herdr quit; a crash or binary handoff instead just drops the connection, so
+    /// the daemon keeps its panes alive for the next herdr to reconnect and resync.
+    Shutdown,
 }
 
 /// Buffer scope for [`Command::RequestText`], matching Go's `terminal.TextScope`.
@@ -124,6 +134,13 @@ pub enum Event {
         protocol_version: i32,
         #[serde(default)]
         error: String,
+        /// Pane IDs the daemon already has live when we connect. Empty on a fresh
+        /// daemon; populated when reconnecting to a persistent daemon after a herdr
+        /// restart or handoff, so we reconcile our restored session against the
+        /// survivors (adopt the matches, expect a resync for each) instead of
+        /// re-creating them. The daemon replays each pane's state right after.
+        #[serde(default)]
+        panes: Vec<u32>,
     },
     PaneFrame {
         pane_id: u32,
@@ -574,11 +591,34 @@ mod tests {
     fn welcome_decodes_with_default_error() {
         let ev: Event = serde_json::from_str(r#"{"type":"welcome","protocol_version":1}"#).unwrap();
         match ev {
-            Event::Welcome { protocol_version, error } => {
+            Event::Welcome { protocol_version, error, panes } => {
                 assert_eq!(protocol_version, 1);
                 assert!(error.is_empty());
+                assert!(panes.is_empty()); // omitted → default empty (fresh daemon)
             }
             other => panic!("wrong event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn welcome_decodes_surviving_panes() {
+        let raw = r#"{"type":"welcome","protocol_version":1,"panes":[3,7,9]}"#;
+        let ev: Event = serde_json::from_str(raw).unwrap();
+        match ev {
+            Event::Welcome { panes, .. } => assert_eq!(panes, vec![3, 7, 9]),
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shutdown_command_serializes() {
+        let json = serde_json::to_string(&Command::Shutdown).unwrap();
+        assert_eq!(json, r#"{"type":"shutdown"}"#, "{json}");
+    }
+
+    #[test]
+    fn request_resync_command_serializes() {
+        let json = serde_json::to_string(&Command::RequestResync { pane_id: 9 }).unwrap();
+        assert_eq!(json, r#"{"type":"request_resync","pane_id":9}"#, "{json}");
     }
 }

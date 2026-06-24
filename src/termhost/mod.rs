@@ -73,18 +73,38 @@ fn connect_backend() -> Option<Arc<TermhostClient>> {
             }
         };
     }
-    // Managed: spawn and supervise the daemon binary ourselves.
+    // Managed: reconnect to a surviving persistent daemon, or spawn a fresh one.
     if let Some(bin) = std::env::var(BIN_ENV_VAR).ok().filter(|p| !p.is_empty()) {
-        return spawn_and_connect(&bin);
+        return connect_or_spawn(&bin);
     }
     None
 }
 
-/// Spawns the daemon binary in managed mode, waits for it to listen, and connects.
-/// On any failure it kills the child (if spawned) and falls back to in-process.
-fn spawn_and_connect(bin: &str) -> Option<Arc<TermhostClient>> {
+/// First tries to reconnect to a persistent daemon left running by a previous herdr
+/// (a restart or binary handoff — its panes are still alive at the session socket);
+/// only spawns a fresh daemon if none is reachable. The reconnect is what makes
+/// termhost shells survive a herdr restart: the new herdr adopts the survivors
+/// (reported in welcome.panes) instead of re-creating them.
+fn connect_or_spawn(bin: &str) -> Option<Arc<TermhostClient>> {
     let socket = managed_socket_path();
-    let _ = std::fs::remove_file(&socket); // clear a stale socket from a prior crash
+    let socket_str = socket.to_string_lossy().into_owned();
+    if let Ok(client) = TermhostClient::connect(&socket_str) {
+        tracing::info!(socket = %socket_str, surviving = client.surviving_panes().len(),
+            "reconnected to persistent termhost daemon");
+        return Some(client);
+    }
+    spawn_and_connect(bin, socket)
+}
+
+/// Spawns the daemon binary in persistent mode, waits for it to listen, and
+/// connects. On any failure it kills the child (if spawned) and falls back to
+/// in-process. The socket is session-keyed (see [`managed_socket_path`]) so the
+/// daemon is rediscoverable by a future herdr after a restart/handoff.
+fn spawn_and_connect(bin: &str, socket: PathBuf) -> Option<Arc<TermhostClient>> {
+    if let Some(parent) = socket.parent() {
+        let _ = std::fs::create_dir_all(parent); // session data dir may not exist yet
+    }
+    let _ = std::fs::remove_file(&socket); // stale socket (connect above already failed)
 
     // Daemon logs would corrupt the TUI, so send them to a sibling log file (or
     // discard them if that can't be created).
@@ -94,14 +114,29 @@ fn spawn_and_connect(bin: &str) -> Option<Arc<TermhostClient>> {
         Err(_) => std::process::Stdio::null(),
     };
 
-    let mut child = match std::process::Command::new(bin)
+    let mut command = std::process::Command::new(bin);
+    command
         .arg("--socket")
         .arg(&socket)
-        .arg("--exit-on-disconnect")
+        .arg("--persistent")
         .stdout(stdio())
-        .stderr(stdio())
-        .spawn()
-    {
+        .stderr(stdio());
+    // Detach into its own session so the daemon outlives us: without setsid it shares
+    // our controlling terminal and process group, and our death (and the closing tty)
+    // would SIGHUP it — defeating persistence. setsid makes it a session leader with
+    // no controlling terminal.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            // SAFETY: setsid in the forked child before exec; only async-signal-safe
+            // libc calls. Failure (already a group leader — not the case here) is
+            // non-fatal, so the error is intentionally ignored.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
             tracing::error!(bin, error = %err,
@@ -140,19 +175,27 @@ fn spawn_and_connect(bin: &str) -> Option<Arc<TermhostClient>> {
     }
 }
 
-/// A short, per-process socket path. Kept short (sockaddr_un.sun_path is ~104
-/// bytes on macOS) and disambiguated by pid so concurrent herdr instances don't
-/// collide.
+/// The persistent daemon's socket, keyed by the herdr *session* (not pid) so a
+/// restarted or handed-off herdr rediscovers the same daemon — its live shells are
+/// still running behind it. Lives in the session data dir alongside `herdr.sock`,
+/// one daemon per session. Concurrent sessions key different dirs and don't collide.
 fn managed_socket_path() -> PathBuf {
-    std::env::temp_dir().join(format!("herdr-termhost-{}.sock", std::process::id()))
+    crate::session::data_dir().join("herdr-termhost.sock")
 }
 
-/// Tears down a daemon this process spawned: SIGTERM (so it cleans up its socket)
-/// then reap. A no-op when attached to a hand-launched daemon or disabled. Called
-/// on orchestrator shutdown; the daemon's `--exit-on-disconnect` is the backstop
-/// if we exit without calling this (e.g. a panic).
+/// Tears down the persistent daemon on a *clean* herdr quit: send `shutdown` so it
+/// exits and removes its own socket, then reap a child we spawned (SIGTERM backstop).
+/// A crash, panic, or binary handoff skips this — the connection just drops and the
+/// daemon keeps its panes alive for the next herdr to reconnect and resync. (The
+/// daemon's idle timeout is the backstop if no herdr ever comes back.)
 pub fn shutdown() {
+    // Tell the daemon to exit, whether we spawned it or merely reconnected to a
+    // survivor — a clean quit means this session is done with it.
+    if let Some(Some(client)) = CLIENT.get() {
+        client.request_shutdown();
+    }
     let Some(mut spawned) = SPAWNED.lock().unwrap().take() else {
+        tracing::info!("termhost daemon sent shutdown (not supervised by us)");
         return;
     };
     #[cfg(unix)]

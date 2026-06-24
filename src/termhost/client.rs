@@ -191,6 +191,11 @@ fn blank_cell() -> wire::CellData {
 pub struct TermhostClient {
     writer: Mutex<UnixStream>,
     panes: Mutex<HashMap<u32, Arc<PaneState>>>,
+    /// Pane IDs the daemon already had live at connect (from welcome.panes). Empty
+    /// on a fresh daemon; populated when we reconnect to a persistent daemon after a
+    /// restart/handoff. Restore reconciles its session against this: a restored pane
+    /// whose ID is here is adopted (not re-created).
+    surviving_panes: Vec<u32>,
 }
 
 /// Parameters for spawning a pane on the backend.
@@ -221,22 +226,23 @@ impl TermhostClient {
             &mut writer,
             &Command::Hello { protocol_version: proto::PROTOCOL_VERSION },
         )?;
-        match proto::read_event(&mut reader)? {
-            Event::Welcome { error, .. } if error.is_empty() => {}
-            Event::Welcome { error, .. } => {
+        let surviving_panes = match proto::read_event(&mut reader)? {
+            Event::Welcome { error, .. } if !error.is_empty() => {
                 return Err(io::Error::other(format!("welcome error: {error}")))
             }
+            Event::Welcome { panes, .. } => panes,
             other => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("expected welcome, got {other:?}"),
                 ))
             }
-        }
+        };
 
         let client = Arc::new(TermhostClient {
             writer: Mutex::new(writer),
             panes: Mutex::new(HashMap::new()),
+            surviving_panes,
         });
 
         let weak = Arc::downgrade(&client);
@@ -344,6 +350,35 @@ impl TermhostClient {
         }
     }
 
+    /// Pane IDs the daemon already had live when we connected (welcome.panes). A
+    /// restarted/handed-off herdr reconciles its restored session against these:
+    /// matching panes are adopted, not re-created.
+    pub fn surviving_panes(&self) -> &[u32] {
+        &self.surviving_panes
+    }
+
+    /// Adopts a pane that already exists in the daemon (a survivor of a herdr
+    /// restart/handoff): registers client-side state + signal sink WITHOUT sending
+    /// CreatePane, then requests a resync so the pane repaints with its current
+    /// state. The reverse of [`create_pane`] for the live-process case.
+    pub fn adopt_pane(
+        self: &Arc<Self>,
+        pane_id: u32,
+        sink: Option<SignalSink>,
+    ) -> io::Result<TermhostPane> {
+        let state = Arc::new(PaneState {
+            grid: Mutex::new(PaneGrid::default()),
+            exit: Mutex::new(None),
+            sink,
+            pending_selection: Mutex::new(None),
+            pending_text: Mutex::new(None),
+        });
+        // Register before requesting the resync so the replayed events route here.
+        self.panes.lock().unwrap().insert(pane_id, state.clone());
+        self.send(&Command::RequestResync { pane_id })?;
+        Ok(TermhostPane { client: self.clone(), id: pane_id, state })
+    }
+
     /// Spawns a pane on the backend and returns a handle to it. `sink` receives
     /// out-of-band pane signals (cwd, agent detection, …) on the reader thread.
     pub fn create_pane(
@@ -374,6 +409,12 @@ impl TermhostClient {
         })?;
 
         Ok(TermhostPane { client: self.clone(), id: spec.pane_id, state })
+    }
+
+    /// Tells a persistent daemon to exit and tear down its panes (clean herdr quit).
+    /// Best-effort: if the daemon is already gone the write just fails and is ignored.
+    pub fn request_shutdown(&self) {
+        let _ = self.send(&Command::Shutdown);
     }
 
     fn send(&self, cmd: &Command) -> io::Result<()> {

@@ -147,6 +147,114 @@ fn spawn_server_managed(
     SpawnedHerdr { _master: Some(pair.master), child }
 }
 
+/// The persistent daemon's session-keyed socket: `data_dir()/herdr-termhost.sock`.
+/// In a debug test build `app_dir_name()` is `herdr-dev`; with no `HERDR_SESSION`
+/// the data dir is just the config dir.
+fn termhost_socket_path(config_home: &Path, session: Option<&str>) -> PathBuf {
+    let app_dir = if cfg!(debug_assertions) { "herdr-dev" } else { "herdr" };
+    let mut dir = config_home.join(app_dir);
+    if let Some(name) = session {
+        dir = dir.join("sessions").join(name);
+    }
+    dir.join("herdr-termhost.sock")
+}
+
+/// Cleanly stops a *persistent* daemon by speaking the framed protocol directly:
+/// connect, say hello, send `shutdown`. Used to reap the daemon a test left running
+/// (it deliberately outlives the herdr that spawned it). Also exercises the real
+/// shutdown command over a socket. No-op if nothing is listening.
+fn termhost_send_shutdown(socket: &Path) {
+    let Ok(mut stream) = UnixStream::connect(socket) else { return };
+    for msg in [
+        r#"{"type":"hello","protocol_version":1}"#,
+        r#"{"type":"shutdown"}"#,
+    ] {
+        let bytes = msg.as_bytes();
+        if stream.write_all(&(bytes.len() as u32).to_le_bytes()).is_err()
+            || stream.write_all(bytes).is_err()
+        {
+            return;
+        }
+    }
+    let _ = stream.flush();
+    thread::sleep(Duration::from_millis(150)); // let the daemon process the shutdown
+}
+
+/// Waits until `path` exists (or the timeout elapses), returning whether it does.
+fn wait_until_exists(path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    path.exists()
+}
+
+/// Like [`spawn_server_managed`] but bound to a *named* session (HERDR_SESSION), so
+/// herdr persists/restores the session across a restart and all its sockets live in
+/// the session data dir. Used to prove termhost shells survive a herdr restart.
+fn spawn_server_managed_session(
+    config_home: &PathBuf,
+    runtime_dir: &PathBuf,
+    daemon_bin: &str,
+    tmpdir: &PathBuf,
+    session: &str,
+) -> SpawnedHerdr {
+    fs::create_dir_all(config_home.join("herdr")).unwrap();
+    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::create_dir_all(runtime_dir).unwrap();
+    fs::create_dir_all(tmpdir).unwrap();
+    register_runtime_dir(runtime_dir);
+    fs::write(config_home.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(config_home.join("herdr-dev/config.toml"), "onboarding = false\n").unwrap();
+
+    let pair = native_pty_system()
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .unwrap();
+
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    cmd.arg("server");
+    cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("TMPDIR", tmpdir);
+    cmd.env("HERDR_SESSION", session); // session-scoped sockets + persisted session file
+    cmd.env_remove("HERDR_SOCKET_PATH");
+    cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
+    cmd.env("SHELL", "/bin/sh");
+    cmd.env_remove("HERDR_ENV");
+    cmd.env_remove("HERDR_TERMHOST_SOCKET");
+    cmd.env("HERDR_TERMHOST_BIN", daemon_bin);
+
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    register_spawned_herdr_pid(child.process_id());
+    drop(pair.slave);
+
+    SpawnedHerdr { _master: Some(pair.master), child }
+}
+
+/// Polls `pane.read` (served from the Go buffer over the seam) until the pane's
+/// recent text contains `needle`, or the timeout elapses.
+fn wait_for_pane_text(api: &Path, pane_id: &str, needle: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let read = send_json_request(
+            api,
+            "r",
+            "pane.read",
+            json!({ "pane_id": pane_id, "source": "recent", "lines": 200 }),
+        );
+        if let Some(text) = read["result"]["read"]["text"].as_str() {
+            if text.contains(needle) {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
 fn send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) -> Value {
     let mut stream = UnixStream::connect(socket_path).expect("should connect to API socket");
     let request = json!({ "id": id, "method": method, "params": params });
@@ -442,7 +550,7 @@ fn termhost_pane_survives_client_reattach() {
 }
 
 #[test]
-fn termhost_managed_daemon_spawns_and_is_supervised() {
+fn termhost_managed_daemon_is_persistent_and_survives_herdr_death() {
     let _lock = test_lock();
 
     // Skip unless told where the Go termhost binary is.
@@ -467,7 +575,6 @@ fn termhost_managed_daemon_spawns_and_is_supervised() {
 
     let spawned =
         spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
-    let herdr_pid = spawned.child.process_id();
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
@@ -475,42 +582,135 @@ fn termhost_managed_daemon_spawns_and_is_supervised() {
     let create =
         send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "managed" }));
     assert!(create.get("error").is_none(), "workspace.create failed: {create}");
-    let pane_id = create["result"]["root_pane"]["pane_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
-        .to_string();
 
-    let _ = pane_id;
-
-    // The managed socket (named by herdr's pid in TMPDIR) appears once herdr spawns
-    // the daemon for the pane — proof the orchestrator launched and connected to a
-    // daemon it manages (the socket path is one only herdr knows, from the binary +
-    // pid). This is the lifecycle contract this test owns; the per-pane render path
-    // is covered by the other e2e tests.
-    let managed_socket = herdr_pid
-        .map(|pid| tmpdir.join(format!("herdr-termhost-{pid}.sock")))
-        .expect("herdr child should report a pid");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && !managed_socket.exists() {
-        thread::sleep(Duration::from_millis(50));
-    }
+    // The persistent daemon binds the session-keyed socket once herdr spawns it for
+    // the pane — proof the orchestrator launched and connected to a daemon it manages.
+    let managed_socket = termhost_socket_path(&config_home, None);
     assert!(
-        managed_socket.exists(),
-        "herdr should have spawned a managed daemon at {managed_socket:?} after pane creation"
+        wait_until_exists(&managed_socket, Duration::from_secs(10)),
+        "herdr should have spawned a persistent daemon at {managed_socket:?} after pane creation"
     );
 
-    // Supervision backstop: kill herdr; the daemon's --exit-on-disconnect must make
-    // it exit and remove its socket, so no orphaned daemon lingers.
-    drop(spawned); // SIGKILLs herdr — no graceful shutdown() runs, exercising the backstop
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Persistence contract: kill herdr (no graceful shutdown). The daemon must
+    // OUTLIVE it — detached via setsid and ignoring the SIGHUP from the closing
+    // controlling terminal — so a future herdr can reconnect to its live shells.
+    drop(spawned); // SIGKILLs herdr
+    thread::sleep(Duration::from_secs(1)); // long enough for any stray SIGHUP to land
+    assert!(
+        managed_socket.exists() && UnixStream::connect(&managed_socket).is_ok(),
+        "persistent daemon should survive the orchestrator's death and stay reachable at {managed_socket:?}"
+    );
+
+    // Clean up the surviving daemon (it deliberately outlived herdr) via shutdown,
+    // which also confirms the shutdown command makes it exit and remove its socket.
+    termhost_send_shutdown(&managed_socket);
+    let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline && managed_socket.exists() {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(
         !managed_socket.exists(),
-        "daemon should exit and remove its socket after the orchestrator dies, but {managed_socket:?} remains"
+        "daemon should exit and remove its socket after a shutdown command, but {managed_socket:?} remains"
+    );
+    cleanup_test_base(&base);
+}
+
+/// The headline 3b proof: a termhost shell SURVIVES a full herdr restart. herdr A
+/// spawns a persistent daemon and a pane; herdr A is killed (daemon + shell live
+/// on); herdr B restarts the same session, reconnects to the daemon, and ADOPTS the
+/// surviving shell — its pre-restart output is still there and it runs new commands.
+#[test]
+fn termhost_pane_survives_herdr_restart() {
+    let _lock = test_lock();
+
+    let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP termhost restart: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            return;
+        }
+    };
+    if !Path::new(&daemon_bin).exists() {
+        eprintln!("SKIP termhost restart: HERDR_TERMHOST_BIN {daemon_bin} not found");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let tmpdir = base.join("tmp");
+    let session = "persist";
+    let app_dir = if cfg!(debug_assertions) { "herdr-dev" } else { "herdr" };
+    let session_dir = config_home.join(app_dir).join("sessions").join(session);
+    let api_socket = session_dir.join("herdr.sock");
+    let termhost_socket = session_dir.join("herdr-termhost.sock");
+    let session_file = session_dir.join("session.json");
+
+    // --- herdr A: create a pane, run a marker, let the session save ---
+    let herdr_a = spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let create =
+        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "persist" }));
+    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
+        .to_string();
+    assert!(
+        wait_until_exists(&termhost_socket, Duration::from_secs(10)),
+        "persistent daemon socket should appear at {termhost_socket:?}"
     );
 
+    let m1 = "survive_marker_111";
+    send_json_request(
+        &api_socket,
+        "s1",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("echo {m1}\n") }),
+    );
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m1, Duration::from_secs(15)),
+        "herdr A's pane should show {m1}"
+    );
+    assert!(
+        wait_until_exists(&session_file, Duration::from_secs(20)),
+        "session should be persisted to {session_file:?} so herdr B can restore it"
+    );
+
+    // --- kill herdr A; the daemon and the live shell must persist ---
+    drop(herdr_a); // SIGKILL — no graceful path runs
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        UnixStream::connect(&termhost_socket).is_ok(),
+        "the persistent daemon (and its shell) should outlive herdr A"
+    );
+
+    // --- herdr B: restore the session, reconnect to the daemon, adopt the shell ---
+    let herdr_b = spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+
+    // The pre-restart output is still in the SAME shell's buffer — the daemon kept
+    // the live process and herdr B adopted it (rather than re-spawning a fresh shell).
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m1, Duration::from_secs(20)),
+        "restored herdr should still see the pre-restart marker {m1} — the shell survived"
+    );
+
+    // The adopted shell is the same live process: a new command runs in it.
+    let m2 = "survive_marker_222";
+    send_json_request(
+        &api_socket,
+        "s2",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("echo {m2}\n") }),
+    );
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m2, Duration::from_secs(15)),
+        "the adopted shell should run a new command and show {m2}"
+    );
+
+    drop(herdr_b);
+    termhost_send_shutdown(&termhost_socket);
     cleanup_test_base(&base);
 }
 
