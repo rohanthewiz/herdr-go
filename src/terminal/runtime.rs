@@ -19,6 +19,13 @@ impl TerminalRuntime {
         self.0.shutdown();
     }
 
+    /// Whether this runtime is backed by the Go termhost daemon (no local PTY fd).
+    /// Live handoff skips such panes: they survive by the replacement reconnecting
+    /// to the persistent daemon and adopting the live shell, not by fd passing.
+    pub fn is_termhost(&self) -> bool {
+        self.0.is_termhost()
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()

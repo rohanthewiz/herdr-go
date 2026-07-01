@@ -831,6 +831,20 @@ impl HeadlessServer {
         for ws in &self.app.state.workspaces {
             for tab in &ws.tabs {
                 for (pane_id, pane) in &tab.panes {
+                    // Termhost panes own no local PTY master fd, so they take no part in
+                    // the fd-passing handoff: they survive by the replacement server
+                    // reconnecting to the persistent daemon and adopting the live shell
+                    // (the captured snapshot still carries the pane, so restore re-adopts
+                    // it). Excluding them here keeps them out of the fd-dup, manifest, and
+                    // pause/preserve machinery below — otherwise the fd dup would fail.
+                    if self
+                        .app
+                        .terminal_runtimes
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|runtime| runtime.is_termhost())
+                    {
+                        continue;
+                    }
                     pane_by_terminal.insert(pane.attached_terminal_id.clone(), pane_id.raw());
                 }
             }
@@ -872,6 +886,16 @@ impl HeadlessServer {
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
         );
+
+        // Termhost panes are captured (above) but kept alive by the persistent daemon,
+        // not handed off via fds. Detach from the daemon now so its single-writer Attach
+        // slot frees for the replacement server to connect, resync, and adopt the live
+        // shells — without this the handoff deadlocks (the old server can't exit and free
+        // the slot until the replacement is ready, but the replacement can't adopt until
+        // the slot frees). Detaching does NOT close panes; later close_pane sends from our
+        // dropping termhost runtimes hit the dead socket and are harmless no-ops.
+        #[cfg(feature = "termhost")]
+        crate::termhost::detach_for_handoff();
 
         let mut handoff_entries = Vec::new();
         for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {

@@ -440,6 +440,22 @@ impl TermhostClient {
         let _ = self.send(&Command::Shutdown);
     }
 
+    /// Detaches from a persistent daemon for a live handoff WITHOUT closing panes.
+    ///
+    /// Shuts the socket down so the daemon reads EOF and returns from its serial
+    /// `Attach`, freeing the single-writer slot for the replacement herdr (waiting in
+    /// the accept backlog) to connect, resync, and adopt the live shells. The daemon
+    /// keeps every pane running across the gap. After this, [`send`](Self::send) fails
+    /// on the dead socket, so a later `close_pane` from a dropping [`TermhostPane`] is
+    /// a harmless no-op — the shells survive for the replacement to adopt. Without this
+    /// the handoff would deadlock: the old server can't exit (and free the slot) until
+    /// the replacement is ready, but the replacement can't adopt until the slot frees.
+    pub fn detach_for_handoff(&self) {
+        if let Ok(w) = self.writer.lock() {
+            let _ = w.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
     fn send(&self, cmd: &Command) -> io::Result<()> {
         let mut w = self.writer.lock().unwrap();
         proto::write_command(&mut *w, cmd)

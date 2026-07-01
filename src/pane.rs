@@ -895,6 +895,21 @@ impl PaneRuntimeIo {
         }
     }
 
+    /// Whether this runtime is backed by the Go termhost daemon (no local PTY fd).
+    /// Such panes survive a live handoff by the replacement reconnecting to the
+    /// persistent daemon and adopting the live shell, not by local-PTY fd passing —
+    /// so the handoff machinery skips them.
+    fn is_termhost(&self) -> bool {
+        #[cfg(feature = "termhost")]
+        {
+            matches!(self, PaneRuntimeIo::Termhost(_))
+        }
+        #[cfg(not(feature = "termhost"))]
+        {
+            false
+        }
+    }
+
     #[cfg(unix)]
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
@@ -1366,6 +1381,11 @@ impl PaneRuntime {
             self.child_wait_completed.as_deref(),
         );
         self.preserve_processes_on_drop = true;
+    }
+
+    /// Whether this runtime is backed by the Go termhost daemon (no local PTY fd).
+    pub fn is_termhost(&self) -> bool {
+        self.io.is_termhost()
     }
 
     #[cfg(unix)]

@@ -73,6 +73,19 @@ pub(crate) fn close_restored_orphans() {
     }
 }
 
+/// Detaches the persistent termhost daemon connection for a live handoff, so the
+/// replacement herdr can reconnect and adopt the live shells (see
+/// [`client::TermhostClient::detach_for_handoff`]). Peeks the already-initialized
+/// client only — if the backend was never used this run there's nothing to detach,
+/// and we don't force a connect just to check.
+#[cfg(unix)]
+pub(crate) fn detach_for_handoff() {
+    if let Some(Some(client)) = CLIENT.get() {
+        client.detach_for_handoff();
+        tracing::info!("detached termhost daemon for live handoff (panes kept alive)");
+    }
+}
+
 fn connect_backend() -> Option<Arc<TermhostClient>> {
     // Dev/manual: attach to a hand-launched daemon at a known socket.
     if let Some(path) = std::env::var(SOCKET_ENV_VAR).ok().filter(|p| !p.is_empty()) {

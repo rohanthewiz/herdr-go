@@ -265,6 +265,36 @@ fn send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) 
     serde_json::from_str(&response).expect("response should be valid JSON")
 }
 
+/// Like [`send_json_request`] but tolerant: returns `None` on any connect/IO/parse
+/// error instead of panicking. Used while the API socket is mid-rebind (e.g. during
+/// a live handoff, when the old server removes the socket and the replacement is
+/// still binding it).
+fn try_send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) -> Option<Value> {
+    let mut stream = UnixStream::connect(socket_path).ok()?;
+    let request = json!({ "id": id, "method": method, "params": params });
+    writeln!(stream, "{request}").ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).ok()?;
+    serde_json::from_str(&response).ok()
+}
+
+/// Waits for the JSON-RPC API at `socket_path` to answer a `ping` with a result.
+/// Tolerates the socket being absent/unbound (returns false on timeout) so it is
+/// safe to call across a handoff where the replacement server is still coming up.
+fn wait_for_api_ready(socket_path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(resp) = try_send_json_request(socket_path, "ping", "ping", json!({})) {
+            if resp.get("result").is_some() {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct FrameWire {
@@ -770,6 +800,129 @@ fn termhost_pane_survives_herdr_restart() {
 
     drop(herdr_b);
     termhost_send_shutdown(&termhost_socket);
+    cleanup_test_base(&base);
+}
+
+/// Scenario C: a termhost shell survives a LIVE HANDOFF (in-place binary upgrade).
+/// Unlike the restart test (scenario B = SIGKILL + fresh start restoring from the
+/// session file), here the running herdr hands its state to a replacement it spawns
+/// itself, without killing the persistent daemon. The replacement reconnects to the
+/// daemon and ADOPTS the surviving shell — sharing the same reconnect/adopt path as
+/// restart, but proving the handoff seam keeps the daemon alive (`handed_off`) rather
+/// than tearing it down on the old server's exit.
+///
+/// This also confirms termhost panes don't break the local-PTY handoff: they own no
+/// PTY master fd to pass, so the handoff must skip them while still completing for any
+/// fd-backed panes. The replacement's reconnect serial-Attach may briefly block until
+/// the old server detaches; `wait_for_api_ready` rides that out.
+#[test]
+fn termhost_pane_survives_live_handoff() {
+    let _lock = test_lock();
+
+    let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP termhost handoff: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            return;
+        }
+    };
+    if !Path::new(&daemon_bin).exists() {
+        eprintln!("SKIP termhost handoff: HERDR_TERMHOST_BIN {daemon_bin} not found");
+        return;
+    }
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let tmpdir = base.join("tmp");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    // --- herdr A: managed daemon + a termhost-backed pane, run a marker ---
+    let herdr_a =
+        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let create =
+        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "handoff" }));
+    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
+        .to_string();
+
+    let managed_socket = termhost_socket_path(&config_home, None);
+    assert!(
+        wait_until_exists(&managed_socket, Duration::from_secs(10)),
+        "herdr should have spawned a persistent daemon at {managed_socket:?}"
+    );
+
+    let m1 = "handoff_marker_111";
+    send_json_request(
+        &api_socket,
+        "s1",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("echo {m1}\n") }),
+    );
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m1, Duration::from_secs(15)),
+        "herdr A's termhost pane should show {m1}"
+    );
+
+    // --- live handoff: herdr A spawns its replacement (same binary) and hands over ---
+    // The replacement inherits A's environment (XDG_CONFIG_HOME, TMPDIR, HERDR_SOCKET_PATH,
+    // HERDR_TERMHOST_BIN), so it rebinds the same API socket and resolves the same daemon.
+    let handoff = send_json_request(
+        &api_socket,
+        "handoff",
+        "server.live_handoff",
+        json!({}),
+    );
+    assert!(
+        handoff.get("error").is_none(),
+        "live handoff should succeed even with a termhost pane present (it owns no PTY \
+         master fd, so the handoff must skip it rather than fail): {handoff}"
+    );
+    drop(herdr_a); // A exits on its own post-handoff; ensure it's reaped if lingering
+
+    // The replacement comes up on the same API socket and reconnects to the daemon.
+    assert!(
+        wait_for_api_ready(&api_socket, Duration::from_secs(20)),
+        "replacement server should rebind the API socket after live handoff"
+    );
+
+    // The daemon was kept alive across the handoff (not torn down like a clean quit),
+    // so the same live shell is still reachable.
+    assert!(
+        UnixStream::connect(&managed_socket).is_ok(),
+        "the persistent daemon should survive the live handoff and stay reachable at {managed_socket:?}"
+    );
+
+    // The pre-handoff output is still in the SAME shell's buffer — the replacement
+    // adopted the surviving shell rather than spawning a fresh one.
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m1, Duration::from_secs(20)),
+        "the handed-off server should still see the pre-handoff marker {m1} — the shell survived"
+    );
+
+    // The adopted shell is the same live process: a new command runs in it.
+    let m2 = "handoff_marker_222";
+    send_json_request(
+        &api_socket,
+        "s2",
+        "pane.send_text",
+        json!({ "pane_id": pane_id, "text": format!("echo {m2}\n") }),
+    );
+    assert!(
+        wait_for_pane_text(&api_socket, &pane_id, m2, Duration::from_secs(15)),
+        "the adopted shell should run a new command and show {m2}"
+    );
+
+    // Clean up: a clean stop of the replacement tears the daemon down (handed_off is
+    // false on the new server), so the managed socket should disappear.
+    let _ = try_send_json_request(&api_socket, "stop", "server.stop", json!({}));
+    termhost_send_shutdown(&managed_socket); // backstop in case the stop raced
     cleanup_test_base(&base);
 }
 
