@@ -12,9 +12,12 @@ categories = ["command-line-utilities"]
 include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
 [features]
-# Phase B: build the Go↔Rust terminal-backend seam (src/termhost). Experimental;
-# off by default so the standard build is unaffected. Reuses existing deps
-# (serde/serde_json/base64), so enabling it pulls in no new crates.
+# Phase C (WS0): the Go terminal backend (src/termhost) is the default — panes
+# run in the Go `termhost` daemon, and an unreachable daemon is a hard error
+# (HERDR_TERMHOST_INPROCESS=1 is the transitional escape hatch). Build with
+# `--no-default-features` for the legacy in-process-only binary while the
+# in-process PTY+ghostty path still exists (removed in WS0 stages C/D).
+default = ["termhost"]
 termhost = []
 
 [dependencies]

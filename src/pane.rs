@@ -1799,26 +1799,36 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
 
-        // When the termhost backend is enabled, the PTY + VT emulation live in the
-        // Go daemon; spawn the pane there instead of an in-process PTY.
+        // The termhost backend is the default: the PTY + VT emulation live in the
+        // Go daemon; spawn the pane there instead of an in-process PTY. An
+        // unreachable daemon is a hard error — HERDR_TERMHOST_INPROCESS=1 is the
+        // transitional escape hatch onto the legacy in-process path below.
         #[cfg(feature = "termhost")]
-        if let Some(client) = crate::termhost::client_if_enabled() {
-            // If a persistent daemon survived a herdr restart/handoff and still has
-            // this pane (reported in welcome.panes), adopt the live shell instead of
-            // spawning a fresh one — that's how termhost shells survive a restart.
-            let adopt = client.surviving_panes().contains(&pane_id.raw());
-            return Self::finish_termhost(
-                pane_id,
-                rows,
-                cols,
-                terminal,
-                kitty_keyboard_flags,
-                cmd,
-                client,
-                events,
-                initial_state.history_ansi,
-                adopt,
-            );
+        match crate::termhost::required_backend() {
+            Ok(crate::termhost::BackendChoice::Termhost(client)) => {
+                // If a persistent daemon survived a herdr restart/handoff and still has
+                // this pane (reported in welcome.panes), adopt the live shell instead of
+                // spawning a fresh one — that's how termhost shells survive a restart.
+                let adopt = client.surviving_panes().contains(&pane_id.raw());
+                return Self::finish_termhost(
+                    pane_id,
+                    rows,
+                    cols,
+                    terminal,
+                    kitty_keyboard_flags,
+                    cmd,
+                    client,
+                    events,
+                    initial_state.history_ansi,
+                    adopt,
+                );
+            }
+            Ok(crate::termhost::BackendChoice::InProcess) => {}
+            Err(err) => {
+                error!(pane = pane_id.raw(), err = %err,
+                    "termhost backend required but unavailable");
+                return Err(err);
+            }
         }
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)

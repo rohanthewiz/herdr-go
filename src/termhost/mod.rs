@@ -1,10 +1,10 @@
-//! Phase B: the Go↔Rust orchestration seam from the Rust (orchestrator) side.
+//! The Go↔Rust orchestration seam from the Rust (orchestrator) side.
 //!
-//! Behind the `termhost` Cargo feature. This module is scaffolding: it defines
-//! the [`TerminalBackend`] abstraction and a client for the Go `termhost`
-//! daemon, but does NOT yet rewire [`crate::pane::PaneRuntime`] — that happens in
-//! the next step. With the feature off (the default), nothing here compiles, so
-//! the existing in-process PTY + ghostty path is completely unaffected.
+//! Behind the `termhost` Cargo feature, which is **on by default** (WS0): the
+//! Go `termhost` daemon is the terminal backend, and an unreachable daemon is
+//! a hard error at pane creation (see [`required_backend`]). The transitional
+//! escape hatch `HERDR_TERMHOST_INPROCESS=1` forces the legacy in-process
+//! PTY + ghostty path until that path is deleted (WS0 stages C/D).
 //!
 //! See ai_docs/phase-b-orchestration-seam.md (in the herdr-web repo) for the
 //! protocol design.
@@ -34,12 +34,26 @@ pub const SOCKET_ENV_VAR: &str = "HERDR_TERMHOST_SOCKET";
 /// shutdown. This is the normal path — no hand-launch required.
 pub const BIN_ENV_VAR: &str = "HERDR_TERMHOST_BIN";
 
+/// Env var escape hatch (transitional — removed together with the in-process
+/// path in WS0 stage C): set to `1`/`true` to force the legacy in-process
+/// PTY + ghostty terminal instead of the termhost daemon.
+pub const INPROCESS_ENV_VAR: &str = "HERDR_TERMHOST_INPROCESS";
+
+/// Installed name of the Go daemon binary, discovered next to the herdr
+/// executable or on PATH when no env var names it.
+const DAEMON_BINARY_NAME: &str = "herdr-termhost";
+
+/// Alternate *sibling-only* name: a dev build of the Go daemon
+/// (`go build ./cmd/termhost`) dropped next to herdr. Not searched on PATH —
+/// too generic a name to trust there.
+const DAEMON_BINARY_ALT_NAME: &str = "termhost";
+
 /// How long to wait for a freshly spawned daemon to start listening.
 const SPAWN_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The process-wide connection to the Go backend, established lazily on first
-/// use. `None` means the backend is disabled (neither env set) or it could not be
-/// reached/spawned (in which case we log and fall back to the in-process path).
+/// use. `None` means the daemon could not be found/reached/spawned — a hard
+/// error at pane creation (see [`required_backend`]).
 static CLIENT: OnceLock<Option<Arc<TermhostClient>>> = OnceLock::new();
 
 /// A daemon this process spawned and is responsible for tearing down. Empty when
@@ -51,11 +65,53 @@ struct SpawnedDaemon {
     socket: PathBuf,
 }
 
-/// Returns the shared termhost client if the backend is enabled and reachable,
-/// connecting (and spawning the daemon if managed) on first call. Cached for the
-/// life of the process.
+/// Returns the shared termhost client if the backend is reachable, connecting
+/// (and spawning the daemon if managed/discovered) on first call. Cached for
+/// the life of the process.
 pub(crate) fn client_if_enabled() -> Option<Arc<TermhostClient>> {
     CLIENT.get_or_init(connect_backend).clone()
+}
+
+/// The backend decision for new panes under the termhost-by-default policy.
+pub(crate) enum BackendChoice {
+    /// Drive the pane through the Go daemon.
+    Termhost(Arc<TermhostClient>),
+    /// Legacy in-process PTY + ghostty path, forced via
+    /// `HERDR_TERMHOST_INPROCESS=1` (deleted in WS0 stage C).
+    InProcess,
+}
+
+/// Resolves the terminal backend, treating an unreachable/undiscoverable daemon
+/// as a **hard error** (WS0 stage A decision): termhost is the default backend,
+/// and silently falling back to the in-process emulator would hide daemon
+/// breakage. `HERDR_TERMHOST_INPROCESS=1` is the transitional escape hatch.
+pub(crate) fn required_backend() -> std::io::Result<BackendChoice> {
+    if inprocess_requested() {
+        return Ok(BackendChoice::InProcess);
+    }
+    // Unit tests keep exercising the legacy in-process path (their pre-flip
+    // behavior) until WS0 stage C6 rewrites them onto a termhost double; the
+    // hard-error policy itself is covered by tests/termhost_e2e.rs against the
+    // real binary.
+    #[cfg(test)]
+    {
+        Ok(BackendChoice::InProcess)
+    }
+    #[cfg(not(test))]
+    match client_if_enabled() {
+        Some(client) => Ok(BackendChoice::Termhost(client)),
+        None => Err(std::io::Error::other(
+            "termhost daemon unreachable: set HERDR_TERMHOST_BIN or HERDR_TERMHOST_SOCKET, \
+             install `herdr-termhost` next to herdr or on PATH, or set \
+             HERDR_TERMHOST_INPROCESS=1 for the legacy in-process terminal (see herdr.log)",
+        )),
+    }
+}
+
+fn inprocess_requested() -> bool {
+    std::env::var(INPROCESS_ENV_VAR)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// After session restore, close any termhost pane the (reconnected) persistent daemon
@@ -95,8 +151,7 @@ fn connect_backend() -> Option<Arc<TermhostClient>> {
                 Some(client)
             }
             Err(err) => {
-                tracing::error!(path, error = %err,
-                    "failed to connect to termhost backend; falling back to in-process PTY");
+                tracing::error!(path, error = %err, "failed to connect to termhost backend");
                 None
             }
         };
@@ -105,7 +160,39 @@ fn connect_backend() -> Option<Arc<TermhostClient>> {
     if let Some(bin) = std::env::var(BIN_ENV_VAR).ok().filter(|p| !p.is_empty()) {
         return connect_or_spawn(&bin);
     }
+    // Default (termhost-by-default): discover the daemon binary next to this
+    // executable, then on PATH.
+    if let Some(bin) = discover_daemon_binary() {
+        tracing::info!(bin, "discovered termhost daemon binary");
+        return connect_or_spawn(&bin);
+    }
+    tracing::error!(
+        "no termhost daemon configured or discovered (HERDR_TERMHOST_BIN/_SOCKET unset, \
+         no `herdr-termhost` next to herdr or on PATH)"
+    );
     None
+}
+
+/// Finds the daemon binary when no env var names it: `herdr-termhost` (or a
+/// dev-built `termhost`) next to the herdr executable, then `herdr-termhost`
+/// on PATH. Env vars always take precedence (see [`connect_backend`]).
+fn discover_daemon_binary() -> Option<String> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in [DAEMON_BINARY_NAME, DAEMON_BINARY_ALT_NAME] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(DAEMON_BINARY_NAME))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 /// First tries to reconnect to a persistent daemon left running by a previous herdr
@@ -125,9 +212,10 @@ fn connect_or_spawn(bin: &str) -> Option<Arc<TermhostClient>> {
 }
 
 /// Spawns the daemon binary in persistent mode, waits for it to listen, and
-/// connects. On any failure it kills the child (if spawned) and falls back to
-/// in-process. The socket is session-keyed (see [`managed_socket_path`]) so the
-/// daemon is rediscoverable by a future herdr after a restart/handoff.
+/// connects. On any failure it kills the child (if spawned) and returns `None`
+/// (a hard error at pane creation). The socket is session-keyed (see
+/// [`managed_socket_path`]) so the daemon is rediscoverable by a future herdr
+/// after a restart/handoff.
 fn spawn_and_connect(bin: &str, socket: PathBuf) -> Option<Arc<TermhostClient>> {
     if let Some(parent) = socket.parent() {
         let _ = std::fs::create_dir_all(parent); // session data dir may not exist yet
@@ -167,8 +255,7 @@ fn spawn_and_connect(bin: &str, socket: PathBuf) -> Option<Arc<TermhostClient>> 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            tracing::error!(bin, error = %err,
-                "failed to spawn termhost daemon; falling back to in-process PTY");
+            tracing::error!(bin, error = %err, "failed to spawn termhost daemon");
             return None;
         }
     };
@@ -194,7 +281,7 @@ fn spawn_and_connect(bin: &str, socket: PathBuf) -> Option<Arc<TermhostClient>> 
             }
             Err(err) => {
                 tracing::error!(socket = %socket_str, error = %err,
-                    "termhost daemon never became reachable; killing it and falling back to in-process PTY");
+                    "termhost daemon never became reachable; killing it");
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
