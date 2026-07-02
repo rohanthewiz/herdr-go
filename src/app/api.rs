@@ -589,10 +589,10 @@ impl App {
         }
 
         if let Some((ws_idx, pane_id)) = self.last_focus {
-            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Lost);
+            self.send_pane_focus_event(ws_idx, pane_id, crate::terminal::types::FocusEvent::Lost);
         }
         if let Some((ws_idx, pane_id)) = current_focus {
-            self.send_pane_focus_event(ws_idx, pane_id, crate::ghostty::FocusEvent::Gained);
+            self.send_pane_focus_event(ws_idx, pane_id, crate::terminal::types::FocusEvent::Gained);
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::WorkspaceFocused,
                 data: crate::api::schema::EventData::WorkspaceFocused {
@@ -628,7 +628,7 @@ impl App {
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-        event: crate::ghostty::FocusEvent,
+        event: crate::terminal::types::FocusEvent,
     ) {
         let Some(runtime) = self.state.workspaces.get(ws_idx).and_then(|_| {
             self.state

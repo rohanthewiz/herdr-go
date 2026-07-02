@@ -122,6 +122,9 @@ fn spawn_server(config_home: &Path, runtime_dir: &Path, api_socket_path: &Path) 
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // Pin the legacy in-process terminal: these suites exercise server/API
+    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
+    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -156,6 +159,9 @@ fn spawn_client_process(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // Pin the legacy in-process terminal: these suites exercise server/API
+    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
+    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
     cmd.arg("client");
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_CONFIG_HOME", config_home);

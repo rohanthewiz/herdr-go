@@ -81,6 +81,11 @@ impl KittyKeyboardTracker {
         }
     }
 
+    /// The currently effective kitty keyboard flags register.
+    pub(crate) fn flags(&self) -> u16 {
+        self.flags
+    }
+
     #[cfg(unix)]
     pub(crate) fn replay_ansi(&self) -> Option<String> {
         if self.stack.is_empty() {

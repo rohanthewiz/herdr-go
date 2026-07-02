@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 
 use crate::app::state::AppState;
 use crate::app::Mode;
-use crate::ghostty::{KittyImageDescriptor, KittyImageFormat, KittyImagePlacement};
+use crate::terminal::types::{KittyImageDescriptor, KittyImageFormat, KittyImagePlacement};
 use crate::layout::PaneId;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -796,7 +796,7 @@ fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ghostty::KittyPlacementRenderInfo;
+    use crate::terminal::types::KittyPlacementRenderInfo;
 
     fn test_placement(viewport_col: i32, viewport_row: i32) -> HostPlacement {
         HostPlacement {

@@ -26,6 +26,8 @@ use crate::pty::actor::{PtyIoActor, PtyIoActorConfig, PtyIoActorHandle, PtyReadR
 mod agent_detection;
 mod cursor;
 mod input;
+#[cfg(feature = "termhost")]
+mod input_mirror;
 mod kitty_keyboard;
 mod osc;
 mod state;
@@ -1780,32 +1782,16 @@ impl PaneRuntime {
     ) -> std::io::Result<Self> {
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
-        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
-        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        terminal
-            .enable_grapheme_cluster_mode()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        if crate::kitty_graphics::is_enabled() {
-            terminal
-                .enable_kitty_graphics()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
-        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
-        if let Some(ansi) = initial_state.history_ansi {
-            pane_terminal.seed_history_ansi(ansi);
-        }
-        let terminal = Arc::new(PaneTerminal::new(pane_terminal));
-        let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
-
         // The termhost backend is the default: the PTY + VT emulation live in the
-        // Go daemon; spawn the pane there instead of an in-process PTY. An
-        // unreachable daemon is a hard error — HERDR_TERMHOST_INPROCESS=1 is the
-        // transitional escape hatch onto the legacy in-process path below.
+        // Go daemon; spawn the pane there instead of an in-process PTY — no local
+        // emulator is constructed, only a plain-data input-mode mirror (stage B2).
+        // An unreachable daemon is a hard error — HERDR_TERMHOST_INPROCESS=1 is
+        // the transitional escape hatch onto the legacy in-process path below.
         #[cfg(feature = "termhost")]
         match crate::termhost::required_backend() {
             Ok(crate::termhost::BackendChoice::Termhost(client)) => {
+                let terminal = Arc::new(PaneTerminal::new_mirror());
+                let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
                 // If a persistent daemon survived a herdr restart/handoff and still has
                 // this pane (reported in welcome.panes), adopt the live shell instead of
                 // spawning a fresh one — that's how termhost shells survive a restart.
@@ -1830,6 +1816,25 @@ impl PaneRuntime {
                 return Err(err);
             }
         }
+
+        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        terminal
+            .enable_grapheme_cluster_mode()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if crate::kitty_graphics::is_enabled() {
+            terminal
+                .enable_kitty_graphics()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        if let Some(ansi) = initial_state.history_ansi {
+            pane_terminal.seed_history_ansi(ansi);
+        }
+        let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+        let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
 
         let spawned = crate::pty::backend::spawn_with_portable_pty(rows, cols, cmd)
             .inspect_err(|err| error!(pane = pane_id.raw(), err = %err, "{spawn_error_message}"))?;
@@ -2766,9 +2771,9 @@ impl PaneRuntime {
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
-    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    ) -> Vec<crate::terminal::types::KittyImagePlacement>
     where
-        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+        F: FnMut(crate::terminal::types::KittyImageDescriptor) -> bool,
     {
         self.terminal
             .kitty_image_placements_with_data_filter(needs_data)
@@ -2807,7 +2812,7 @@ impl PaneRuntime {
         self.send_bytes(Bytes::from(payload)).await
     }
 
-    pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
+    pub fn try_send_focus_event(&self, event: crate::terminal::types::FocusEvent) -> bool {
         if !self
             .input_state()
             .map(|state| state.focus_reporting)
@@ -2816,9 +2821,7 @@ impl PaneRuntime {
             return false;
         }
 
-        let Ok(bytes) = crate::ghostty::encode_focus(event) else {
-            return false;
-        };
+        let bytes = crate::terminal::types::encode_focus(event);
         if let Err(err) = self.try_send_bytes(Bytes::from(bytes)) {
             warn!(err = %err, ?event, "failed to forward pane focus event");
         }
@@ -3371,7 +3374,7 @@ mod tests {
             detect_handle: tokio::spawn(async {}).abort_handle(),
         };
 
-        assert!(runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert!(runtime.try_send_focus_event(crate::terminal::types::FocusEvent::Gained));
         assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"\x1b[I"));
     }
 
@@ -3402,7 +3405,7 @@ mod tests {
             detect_handle: tokio::spawn(async {}).abort_handle(),
         };
 
-        assert!(!runtime.try_send_focus_event(crate::ghostty::FocusEvent::Gained));
+        assert!(!runtime.try_send_focus_event(crate::terminal::types::FocusEvent::Gained));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv())
                 .await

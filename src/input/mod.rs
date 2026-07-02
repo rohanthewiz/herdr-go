@@ -4,7 +4,8 @@ mod parse;
 
 #[allow(unused_imports)]
 pub use encode::{
-    encode_cursor_key, encode_key, encode_mouse_button, encode_mouse_scroll, encode_terminal_key,
+    encode_cursor_key, encode_key, encode_mouse_button, encode_mouse_moved, encode_mouse_scroll,
+    encode_terminal_key, encode_terminal_key_with_modes,
 };
 #[cfg(not(windows))]
 pub use model::ime_compatible_keyboard_enhancement_flags;

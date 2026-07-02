@@ -74,6 +74,9 @@ fn spawn_server_with_env(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // Pin the legacy in-process terminal: these suites exercise server/API
+    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
+    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -117,6 +120,9 @@ fn spawn_named_session_server(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // Pin the legacy in-process terminal: these suites exercise server/API
+    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
+    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -151,6 +157,9 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    // Pin the legacy in-process terminal: these suites exercise server/API
+    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
+    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);

@@ -2,6 +2,7 @@ mod id;
 mod runtime;
 mod runtime_registry;
 pub mod state;
+pub mod types;
 
 pub use id::TerminalId;
 pub use runtime::TerminalRuntime;

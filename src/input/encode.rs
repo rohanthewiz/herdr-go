@@ -24,6 +24,46 @@ pub fn encode_terminal_key(key: TerminalKey, protocol: KeyboardProtocol) -> Vec<
     encode_legacy(key.as_key_event())
 }
 
+/// Like [`encode_terminal_key`] but honoring DECCKM application cursor keys:
+/// unmodified cursor keys become SS3 sequences when the mode is set. This is
+/// the ghostty-free encoding path for termhost panes (WS0 stage B2), where
+/// the input-mode state is mirrored from the Go daemon instead of read from
+/// an in-process emulator.
+pub fn encode_terminal_key_with_modes(
+    key: TerminalKey,
+    protocol: KeyboardProtocol,
+    application_cursor: bool,
+) -> Vec<u8> {
+    if let Some(bytes) = encode_text_input(&key) {
+        return bytes;
+    }
+
+    if let KeyboardProtocol::Kitty { flags } = protocol {
+        if let Some(bytes) = try_encode_csi_u(&key, flags) {
+            return bytes;
+        }
+    }
+
+    let event = key.as_key_event();
+    // DECCKM only applies under the legacy protocol: kitty explicitly ignores
+    // cursor key mode while the enhancement is active.
+    if matches!(protocol, KeyboardProtocol::Legacy)
+        && application_cursor
+        && event.modifiers.is_empty()
+    {
+        match event.code {
+            KeyCode::Up => return b"\x1bOA".to_vec(),
+            KeyCode::Down => return b"\x1bOB".to_vec(),
+            KeyCode::Right => return b"\x1bOC".to_vec(),
+            KeyCode::Left => return b"\x1bOD".to_vec(),
+            KeyCode::Home => return b"\x1bOH".to_vec(),
+            KeyCode::End => return b"\x1bOF".to_vec(),
+            _ => {}
+        }
+    }
+    encode_legacy(event)
+}
+
 #[allow(dead_code)] // exercised in input unit tests; production uses TerminalRuntime helpers
 pub fn encode_cursor_key(code: KeyCode, application_cursor: bool) -> Vec<u8> {
     match (code, application_cursor) {
@@ -78,6 +118,17 @@ pub fn encode_mouse_button(
         _ => return None,
     };
     encode_mouse_cb(button, release, column, row, modifiers, encoding)
+}
+
+/// Encode a buttonless mouse-motion report (any-motion tracking, DEC 1003):
+/// cb base 35 = "no button" (3) + motion flag (32).
+pub fn encode_mouse_moved(
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+    encoding: MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
+    encode_mouse_cb(35, false, column, row, modifiers, encoding)
 }
 
 #[allow(dead_code)] // only reached through mouse encoding helpers above
@@ -146,8 +197,10 @@ fn push_mouse_codepoint(bytes: &mut Vec<u8>, value: u32) -> Option<()> {
 fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
     let mods = key.modifiers;
 
-    // Unmodified keys use legacy encoding (more compatible)
-    if mods.is_empty() {
+    // Unmodified keys use legacy encoding (more compatible) — except Esc: a
+    // bare 0x1b is exactly what the disambiguate flag exists to eliminate, so
+    // kitty (and ghostty) always report Esc as CSI 27 u under the protocol.
+    if mods.is_empty() && key.code != KeyCode::Esc {
         return None;
     }
 
@@ -180,6 +233,9 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
         }
         KeyCode::Enter => (13, None),
         KeyCode::Tab => (9, None),
+        // Shift+Tab is still Tab under kitty: codepoint 9 with the shift
+        // modifier bit (crossterm reports it as BackTab + SHIFT).
+        KeyCode::BackTab => (9, None),
         KeyCode::Backspace => (127, None),
         KeyCode::Esc => (27, None),
         _ => return None, // fall back to legacy for unhandled keys
@@ -192,6 +248,9 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
         (Some(shifted), Some(event)) => format!("\x1b[{codepoint}:{shifted};{modifier}:{event}u"),
         (Some(shifted), None) => format!("\x1b[{codepoint}:{shifted};{modifier}u"),
         (None, Some(event)) => format!("\x1b[{codepoint};{modifier}:{event}u"),
+        // No modifiers and no event to report: omit the params entirely
+        // (kitty renders CSI 27 u, not CSI 27;1u).
+        (None, None) if modifier == 1 => format!("\x1b[{codepoint}u"),
         (None, None) => format!("\x1b[{codepoint};{modifier}u"),
     };
 

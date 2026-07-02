@@ -25,6 +25,14 @@ use std::sync::{Once, OnceLock};
 
 pub use bindings as ffi;
 
+// Shared plain-data terminal types (relocated in WS0 stage B): the app and
+// termhost paths import these ghostty-free from `crate::terminal::types`.
+// FocusEvent/encode_focus moved there outright — focus encoding is a fixed
+// CSI pair and no longer goes through the FFI.
+use crate::terminal::types::{
+    KittyImageDescriptor, KittyImageFormat, KittyImagePlacement, KittyPlacementRenderInfo,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error(ffi::GhosttyResult);
 
@@ -103,21 +111,6 @@ impl Dirty {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusEvent {
-    Gained,
-    Lost,
-}
-
-impl FocusEvent {
-    fn as_raw(self) -> ffi::GhosttyFocusEvent {
-        match self {
-            Self::Gained => ffi::GhosttyFocusEvent_GHOSTTY_FOCUS_GAINED,
-            Self::Lost => ffi::GhosttyFocusEvent_GHOSTTY_FOCUS_LOST,
-        }
-    }
-}
-
 pub const MOD_SHIFT: u16 = ffi::GHOSTTY_MODS_SHIFT as u16;
 pub const MOD_CTRL: u16 = ffi::GHOSTTY_MODS_CTRL as u16;
 pub const MOD_ALT: u16 = ffi::GHOSTTY_MODS_ALT as u16;
@@ -180,54 +173,6 @@ const KITTY_PLACEMENT_DATA_ROWS: ffi::GhosttyKittyGraphicsPlacementData = 11;
 
 static INSTALL_PNG_DECODER: Once = Once::new();
 static KITTY_PLACEHOLDER_DIACRITICS: OnceLock<HashMap<u32, u32>> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub enum KittyImageFormat {
-    Rgb,
-    Rgba,
-    Png,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KittyImagePlacement {
-    pub image_id: u32,
-    pub placement_id: u32,
-    pub z: i32,
-    pub x_offset: u32,
-    pub y_offset: u32,
-    pub image_width: u32,
-    pub image_height: u32,
-    pub format: KittyImageFormat,
-    pub data_len: usize,
-    pub data_fingerprint: u64,
-    pub data: Vec<u8>,
-    pub render: KittyPlacementRenderInfo,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KittyImageDescriptor {
-    pub image_id: u32,
-    pub placement_id: u32,
-    pub image_width: u32,
-    pub image_height: u32,
-    pub format: KittyImageFormat,
-    pub data_len: usize,
-    pub data_fingerprint: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KittyPlacementRenderInfo {
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub grid_cols: u32,
-    pub grid_rows: u32,
-    pub viewport_col: i32,
-    pub viewport_row: i32,
-    pub source_x: u32,
-    pub source_y: u32,
-    pub source_width: u32,
-    pub source_height: u32,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KittyVirtualPlacementSpec {
@@ -526,30 +471,6 @@ fn decode_png_rgba(bytes: &[u8]) -> Option<DecodedPng> {
         height: info.height,
         data,
     })
-}
-
-pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
-    let mut required = 0usize;
-    // SAFETY: null buffer + out len is the documented way to query required size.
-    let result =
-        unsafe { ffi::ghostty_focus_encode(event.as_raw(), ptr::null_mut(), 0, &mut required) };
-    if result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE {
-        result.into_result()?;
-    }
-
-    let mut buffer = vec![0u8; required];
-    // SAFETY: buffer is allocated for required size; function writes at most that many bytes.
-    unsafe {
-        ffi::ghostty_focus_encode(
-            event.as_raw(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut required,
-        )
-        .into_result()?;
-    }
-    buffer.truncate(required);
-    Ok(buffer)
 }
 
 pub struct Terminal {
@@ -2725,11 +2646,8 @@ mod tests {
         assert_eq!(placements[0].render.grid_rows, 1);
     }
 
-    #[test]
-    fn focus_encoding_matches_expected_sequences() {
-        assert_eq!(encode_focus(FocusEvent::Gained).unwrap(), b"\x1b[I");
-        assert_eq!(encode_focus(FocusEvent::Lost).unwrap(), b"\x1b[O");
-    }
+    // focus_encoding_matches_expected_sequences moved to terminal::types
+    // (encode_focus is ghostty-free since WS0 stage B).
 
     #[test]
     fn write_pty_callback_receives_terminal_query_responses() {

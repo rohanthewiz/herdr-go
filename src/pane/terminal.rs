@@ -99,7 +99,7 @@ impl InputState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
@@ -135,13 +135,37 @@ pub(crate) struct GhosttyPaneCore {
     cursor_settle_state: CursorPositionSettleState,
 }
 
-pub(crate) struct PaneTerminal {
-    pub(crate) ghostty: GhosttyPaneTerminal,
+/// A pane's local terminal-side state. In-process panes own a full emulator;
+/// termhost panes (VT in the Go daemon) carry only mirrored input modes +
+/// pure encoders (WS0 stage B2). Buffer-reading methods on the `Mirror`
+/// variant return empty defaults — `PaneRuntime`'s Go-backend arms answer
+/// those queries before the fall-through can reach here.
+// Size skew is transitional: the big Ghostty variant is deleted with the
+// in-process path in WS0 stage D, and PaneTerminal always lives in an Arc.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PaneTerminal {
+    Ghostty(GhosttyPaneTerminal),
+    #[cfg(feature = "termhost")]
+    Mirror(super::input_mirror::InputMirror),
 }
 
 impl PaneTerminal {
     pub(crate) fn new(ghostty: GhosttyPaneTerminal) -> Self {
-        Self { ghostty }
+        Self::Ghostty(ghostty)
+    }
+
+    #[cfg(feature = "termhost")]
+    pub(crate) fn new_mirror() -> Self {
+        Self::Mirror(super::input_mirror::InputMirror::new())
+    }
+
+    /// The in-process emulator, when this pane has one.
+    fn ghostty(&self) -> Option<&GhosttyPaneTerminal> {
+        match self {
+            Self::Ghostty(ghostty) => Some(ghostty),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(_) => None,
+        }
     }
 
     pub fn process_pty_bytes(
@@ -151,8 +175,9 @@ impl PaneTerminal {
         bytes: &[u8],
         response_writer: &mpsc::Sender<Bytes>,
     ) -> ProcessBytesResult {
-        self.ghostty
-            .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
+        self.ghostty()
+            .map(|ghostty| ghostty.process_pty_bytes(pane_id, shell_pid, bytes, response_writer))
+            .unwrap_or_default()
     }
 
     pub fn resize(
@@ -162,85 +187,125 @@ impl PaneTerminal {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Vec<Bytes> {
-        self.ghostty
-            .resize(rows, cols, cell_width_px, cell_height_px)
+        self.ghostty()
+            .map(|ghostty| ghostty.resize(rows, cols, cell_width_px, cell_height_px))
+            .unwrap_or_default()
     }
 
     pub fn scroll_up(&self, lines: usize) {
-        self.ghostty.scroll_up(lines);
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.scroll_up(lines);
+        }
     }
 
     pub fn scroll_down(&self, lines: usize) {
-        self.ghostty.scroll_down(lines);
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.scroll_down(lines);
+        }
     }
 
     pub fn scroll_reset(&self) {
-        self.ghostty.scroll_reset();
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.scroll_reset();
+        }
     }
 
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
-        self.ghostty.set_scroll_offset_from_bottom(lines);
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.set_scroll_offset_from_bottom(lines);
+        }
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
-        self.ghostty.scroll_metrics()
+        self.ghostty()?.scroll_metrics()
     }
 
     pub fn input_state(&self) -> Option<InputState> {
-        self.ghostty.input_state()
+        match self {
+            Self::Ghostty(ghostty) => ghostty.input_state(),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.input_state(),
+        }
     }
 
     #[cfg(feature = "termhost")]
     pub fn apply_input_modes(&self, modes: &crate::termhost::PaneInputModes) {
-        self.ghostty.apply_input_modes(modes);
+        match self {
+            Self::Ghostty(ghostty) => ghostty.apply_input_modes(modes),
+            Self::Mirror(mirror) => mirror.apply_input_modes(modes),
+        }
     }
 
     pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
-        self.ghostty.wheel_routing()
+        match self {
+            Self::Ghostty(ghostty) => ghostty.wheel_routing(),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.wheel_routing(),
+        }
     }
 
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
-        self.ghostty.cursor_state()
+        self.ghostty()?.cursor_state()
     }
 
     pub fn synchronized_output_active(&self) -> bool {
-        self.ghostty.synchronized_output_active()
+        match self {
+            Self::Ghostty(ghostty) => ghostty.synchronized_output_active(),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.synchronized_output_active(),
+        }
     }
 
     pub fn visible_text(&self) -> String {
-        self.ghostty.visible_text()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::visible_text)
+            .unwrap_or_default()
     }
 
     pub fn visible_ansi(&self) -> String {
-        self.ghostty.visible_ansi()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::visible_ansi)
+            .unwrap_or_default()
     }
 
     pub fn detection_text(&self) -> String {
-        self.ghostty.detection_text()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::detection_text)
+            .unwrap_or_default()
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
-        self.ghostty.recent_text(lines)
+        self.ghostty()
+            .map(|ghostty| ghostty.recent_text(lines))
+            .unwrap_or_default()
     }
 
     pub fn recent_ansi(&self, lines: usize) -> String {
-        self.ghostty.recent_ansi(lines)
+        self.ghostty()
+            .map(|ghostty| ghostty.recent_ansi(lines))
+            .unwrap_or_default()
     }
 
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
-        self.ghostty.recent_unwrapped_text(lines)
+        self.ghostty()
+            .map(|ghostty| ghostty.recent_unwrapped_text(lines))
+            .unwrap_or_default()
     }
 
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
-        self.ghostty.recent_unwrapped_ansi(lines)
+        self.ghostty()
+            .map(|ghostty| ghostty.recent_unwrapped_ansi(lines))
+            .unwrap_or_default()
     }
 
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
-        self.ghostty.extract_selection(selection)
+        self.ghostty()?.extract_selection(selection)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
-        self.ghostty.render(frame, area, show_cursor);
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.render(frame, area, show_cursor);
+        }
     }
 
     pub fn collect_dirty_patch(
@@ -248,64 +313,89 @@ impl PaneTerminal {
         area_width: u16,
         area_height: u16,
     ) -> TerminalDirtyPatchOutcome {
-        self.ghostty.collect_dirty_patch(area_width, area_height)
+        self.ghostty()
+            .map(|ghostty| ghostty.collect_dirty_patch(area_width, area_height))
+            // Mirror panes should be answered by the Go-backend arm; if this
+            // is ever reached, force the full-redraw path.
+            .unwrap_or(TerminalDirtyPatchOutcome::Fallback)
     }
 
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
-        self.ghostty.visible_hyperlinks(area)
+        self.ghostty()
+            .map(|ghostty| ghostty.visible_hyperlinks(area))
+            .unwrap_or_default()
     }
 
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
-    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    ) -> Vec<crate::terminal::types::KittyImagePlacement>
     where
-        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+        F: FnMut(crate::terminal::types::KittyImageDescriptor) -> bool,
     {
-        self.ghostty
-            .kitty_image_placements_with_data_filter(needs_data)
+        self.ghostty()
+            .map(|ghostty| ghostty.kitty_image_placements_with_data_filter(needs_data))
+            .unwrap_or_default()
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
-        self.ghostty.apply_host_terminal_theme(theme);
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.apply_host_terminal_theme(theme);
+        }
     }
 
     pub fn has_transient_default_color_override(&self) -> bool {
-        self.ghostty.has_transient_default_color_override()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::has_transient_default_color_override)
+            .unwrap_or(false)
     }
 
     pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
-        self.ghostty
-            .maybe_restore_host_terminal_theme(pane_id, shell_pid)
+        self.ghostty()
+            .map(|ghostty| ghostty.maybe_restore_host_terminal_theme(pane_id, shell_pid))
+            .unwrap_or(false)
     }
 
     #[allow(dead_code)] // exposed for Stage C (detection loop wiring)
     pub fn agent_osc_title(&self) -> String {
-        self.ghostty.agent_osc_title()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::agent_osc_title)
+            .unwrap_or_default()
     }
 
     #[allow(dead_code)] // exposed for Stage C (detection loop wiring)
     pub fn agent_osc_progress(&self) -> String {
-        self.ghostty.agent_osc_progress()
+        self.ghostty()
+            .map(GhosttyPaneTerminal::agent_osc_progress)
+            .unwrap_or_default()
     }
 
     /// Clears retained OSC title/progress evidence on foreground agent change.
     pub fn clear_agent_osc_state(&self) {
-        self.ghostty.clear_agent_osc_state()
+        if let Some(ghostty) = self.ghostty() {
+            ghostty.clear_agent_osc_state();
+        }
     }
 
     pub fn keyboard_protocol(
         &self,
         fallback: crate::input::KeyboardProtocol,
     ) -> crate::input::KeyboardProtocol {
-        self.ghostty.keyboard_protocol().unwrap_or(fallback)
+        match self {
+            Self::Ghostty(ghostty) => ghostty.keyboard_protocol().unwrap_or(fallback),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.keyboard_protocol().unwrap_or(fallback),
+        }
     }
 
     #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
-        self.ghostty
-            .kitty_keyboard_state_ansi()
-            .filter(|ansi| !ansi.is_empty())
+        match self {
+            Self::Ghostty(ghostty) => ghostty.kitty_keyboard_state_ansi(),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.kitty_keyboard_state_ansi(),
+        }
+        .filter(|ansi| !ansi.is_empty())
     }
 
     pub fn encode_terminal_key(
@@ -313,7 +403,11 @@ impl PaneTerminal {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
-        self.ghostty.encode_terminal_key(key, protocol)
+        match self {
+            Self::Ghostty(ghostty) => ghostty.encode_terminal_key(key, protocol),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.encode_terminal_key(key, protocol),
+        }
     }
 
     pub fn encode_mouse_button(
@@ -323,8 +417,11 @@ impl PaneTerminal {
         row: u16,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.ghostty
-            .encode_mouse_button(kind, column, row, modifiers)
+        match self {
+            Self::Ghostty(ghostty) => ghostty.encode_mouse_button(kind, column, row, modifiers),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.encode_mouse_button(kind, column, row, modifiers),
+        }
     }
 
     pub fn encode_mouse_motion(
@@ -334,8 +431,11 @@ impl PaneTerminal {
         row: u16,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.ghostty
-            .encode_mouse_motion(kind, column, row, modifiers)
+        match self {
+            Self::Ghostty(ghostty) => ghostty.encode_mouse_motion(kind, column, row, modifiers),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.encode_mouse_motion(kind, column, row, modifiers),
+        }
     }
 
     pub fn encode_mouse_wheel(
@@ -345,8 +445,11 @@ impl PaneTerminal {
         row: u16,
         modifiers: crossterm::event::KeyModifiers,
     ) -> Option<Vec<u8>> {
-        self.ghostty
-            .encode_mouse_wheel(kind, column, row, modifiers)
+        match self {
+            Self::Ghostty(ghostty) => ghostty.encode_mouse_wheel(kind, column, row, modifiers),
+            #[cfg(feature = "termhost")]
+            Self::Mirror(mirror) => mirror.encode_mouse_wheel(kind, column, row, modifiers),
+        }
     }
 }
 
@@ -1222,9 +1325,9 @@ impl GhosttyPaneTerminal {
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
-    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    ) -> Vec<crate::terminal::types::KittyImagePlacement>
     where
-        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+        F: FnMut(crate::terminal::types::KittyImageDescriptor) -> bool,
     {
         self.core
             .lock()

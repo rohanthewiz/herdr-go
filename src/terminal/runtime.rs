@@ -339,9 +339,9 @@ impl TerminalRuntime {
     pub fn kitty_image_placements_with_data_filter<F>(
         &self,
         needs_data: F,
-    ) -> Vec<crate::ghostty::KittyImagePlacement>
+    ) -> Vec<crate::terminal::types::KittyImagePlacement>
     where
-        F: FnMut(crate::ghostty::KittyImageDescriptor) -> bool,
+        F: FnMut(crate::terminal::types::KittyImageDescriptor) -> bool,
     {
         self.0.kitty_image_placements_with_data_filter(needs_data)
     }
@@ -366,7 +366,7 @@ impl TerminalRuntime {
         self.0.send_paste(text).await
     }
 
-    pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
+    pub fn try_send_focus_event(&self, event: crate::terminal::types::FocusEvent) -> bool {
         self.0.try_send_focus_event(event)
     }
 
