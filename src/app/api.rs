@@ -962,50 +962,12 @@ mod tests {
         assert!(status.success(), "git init failed for {}", path.display());
     }
 
-    #[tokio::test]
-    async fn manifest_update_event_resets_matching_agent_detection_runtime() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![crate::workspace::Workspace::test_new("manifest-reset")];
-        app.state.ensure_test_terminals();
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .detected_agent = Some(Agent::Codex);
-        let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
-        let reset_notify = runtime.agent_detection_reset_notify_for_test();
-        app.terminal_runtimes.insert(terminal_id, runtime);
-
-        app.handle_internal_event(AppEvent::AgentDetectionManifestsUpdated {
-            updated: vec![crate::detect::manifest_update::ManifestUpdateCommit {
-                agent: Agent::Codex,
-                version: crate::detect::manifest_update::ManifestVersion::parse("2026.06.10.1")
-                    .unwrap(),
-            }],
-            status: crate::detect::manifest_update::ManifestUpdateStatus::default(),
-        });
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            reset_notify.notified(),
-        )
-        .await
-        .expect("matching agent detection runtime should be reset");
-    }
+    // The Rust-side detection-reset plumbing these requests used to poke is a
+    // no-op since WS0 stage C (the Go daemon owns agent detection); the tests
+    // below keep pinning the API response contracts only.
 
     #[tokio::test]
-    async fn server_reload_agent_manifests_resets_detection_runtimes() {
+    async fn server_reload_agent_manifests_reports_reloaded_manifests() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -1021,7 +983,6 @@ mod tests {
             .attached_terminal_id
             .clone();
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
-        let reset_notify = runtime.agent_detection_reset_notify_for_test();
         app.terminal_runtimes.insert(terminal_id, runtime);
 
         let response = app.handle_api_request(crate::api::schema::Request {
@@ -1036,17 +997,10 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            reset_notify.notified(),
-        )
-        .await
-        .expect("manual manifest reload should reset detection runtimes");
     }
 
     #[tokio::test]
-    async fn server_agent_manifests_reports_status_without_resetting_runtimes() {
+    async fn server_agent_manifests_reports_status() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -1062,7 +1016,6 @@ mod tests {
             .attached_terminal_id
             .clone();
         let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
-        let reset_notify = runtime.agent_detection_reset_notify_for_test();
         app.terminal_runtimes.insert(terminal_id, runtime);
 
         let response = app.handle_api_request(crate::api::schema::Request {
@@ -1077,15 +1030,6 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(10),
-                reset_notify.notified(),
-            )
-            .await
-            .is_err(),
-            "status request should not reset detection runtimes"
-        );
     }
 
     #[tokio::test]

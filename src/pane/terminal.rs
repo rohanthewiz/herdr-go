@@ -145,7 +145,9 @@ pub(crate) struct GhosttyPaneCore {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum PaneTerminal {
     Ghostty(GhosttyPaneTerminal),
+    // In test builds the only constructor (the real spawn tail) is cfg'd out.
     #[cfg(feature = "termhost")]
+    #[cfg_attr(test, allow(dead_code))]
     Mirror(super::input_mirror::InputMirror),
 }
 
@@ -155,6 +157,7 @@ impl PaneTerminal {
     }
 
     #[cfg(feature = "termhost")]
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn new_mirror() -> Self {
         Self::Mirror(super::input_mirror::InputMirror::new())
     }
@@ -344,12 +347,16 @@ impl PaneTerminal {
         }
     }
 
+    /// Unused since WS0 stage C (Rust detection task deleted).
+    #[allow(dead_code)]
     pub fn has_transient_default_color_override(&self) -> bool {
         self.ghostty()
             .map(GhosttyPaneTerminal::has_transient_default_color_override)
             .unwrap_or(false)
     }
 
+    /// Unused since WS0 stage C (Rust detection task deleted).
+    #[allow(dead_code)]
     pub fn maybe_restore_host_terminal_theme(&self, pane_id: PaneId, shell_pid: u32) -> bool {
         self.ghostty()
             .map(|ghostty| ghostty.maybe_restore_host_terminal_theme(pane_id, shell_pid))
@@ -371,6 +378,8 @@ impl PaneTerminal {
     }
 
     /// Clears retained OSC title/progress evidence on foreground agent change.
+    /// Unused since WS0 stage C (Rust detection task deleted).
+    #[allow(dead_code)]
     pub fn clear_agent_osc_state(&self) {
         if let Some(ghostty) = self.ghostty() {
             ghostty.clear_agent_osc_state();
@@ -860,7 +869,8 @@ impl GhosttyPaneTerminal {
             return;
         };
 
-        let is_alt = core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate);
+        let is_alt =
+            core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate);
         if modes.alternate_screen && !is_alt {
             core.terminal.write(b"\x1b[?1049h");
         } else if !modes.alternate_screen && is_alt {
@@ -889,8 +899,9 @@ impl GhosttyPaneTerminal {
         // Mouse tracking + encoding are fed as the program's own escape sequences
         // (CSI ? Pn h/l) rather than mode_set: the libghostty MouseEncoder reads its
         // tracking state from the sequence path, not the mode bit that mode_get sees.
-        core.terminal.write(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l"); // clear all tracking
-        // Wire codes: 1 x10, 2 press+release, 3 button-motion, 4 any-motion.
+        core.terminal
+            .write(b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l"); // clear all tracking
+                                                                  // Wire codes: 1 x10, 2 press+release, 3 button-motion, 4 any-motion.
         let mouse_set: &[u8] = match modes.mouse_mode {
             1 => b"\x1b[?9h",
             2 => b"\x1b[?1000h",
@@ -2690,8 +2701,14 @@ mod tests {
 
         let state = pane.input_state().expect("input_state");
         assert!(state.bracketed_paste && state.focus_reporting && state.application_cursor);
-        assert_eq!(state.mouse_protocol_mode, crate::input::MouseProtocolMode::AnyMotion);
-        assert_eq!(state.mouse_protocol_encoding, crate::input::MouseProtocolEncoding::Sgr);
+        assert_eq!(
+            state.mouse_protocol_mode,
+            crate::input::MouseProtocolMode::AnyMotion
+        );
+        assert_eq!(
+            state.mouse_protocol_encoding,
+            crate::input::MouseProtocolEncoding::Sgr
+        );
 
         // The encoders read the same emulator, so mouse reporting now produces SGR.
         let bytes = pane
@@ -2702,12 +2719,18 @@ mod tests {
                 crossterm::event::KeyModifiers::empty(),
             )
             .expect("mouse reporting enabled → Some bytes");
-        assert!(bytes.starts_with(b"\x1b[<"), "SGR mouse report, got {bytes:?}");
+        assert!(
+            bytes.starts_with(b"\x1b[<"),
+            "SGR mouse report, got {bytes:?}"
+        );
 
         // Program disabled tracking → reporting off, encoder declines.
         pane.apply_input_modes(&crate::termhost::PaneInputModes::default());
         let state = pane.input_state().expect("input_state");
-        assert_eq!(state.mouse_protocol_mode, crate::input::MouseProtocolMode::None);
+        assert_eq!(
+            state.mouse_protocol_mode,
+            crate::input::MouseProtocolMode::None
+        );
         assert!(!state.bracketed_paste);
         assert!(pane
             .encode_mouse_button(

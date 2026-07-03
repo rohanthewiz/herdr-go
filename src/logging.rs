@@ -180,17 +180,6 @@ pub(crate) fn pane_spawn_started(
     );
 }
 
-pub(crate) fn pane_spawned(pane_id: u32, pid: u32) {
-    tracing::info!(
-        event = "pane.spawned",
-        subsystem = "pane",
-        outcome = "ok",
-        pane_id,
-        pid,
-        "pane child spawned"
-    );
-}
-
 pub(crate) fn pane_exited(pane_id: u32, status: &str) {
     tracing::info!(
         event = "pane.exit",
@@ -199,17 +188,6 @@ pub(crate) fn pane_exited(pane_id: u32, status: &str) {
         pane_id,
         status,
         "pane child exited"
-    );
-}
-
-pub(crate) fn pane_exit_failed(pane_id: u32, err: &str) {
-    tracing::error!(
-        event = "pane.exit",
-        subsystem = "pane",
-        outcome = "error",
-        pane_id,
-        err,
-        "pane child wait failed"
     );
 }
 

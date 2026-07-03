@@ -541,61 +541,36 @@ fn restore_tab(
             continue;
         }
 
-        #[cfg(not(unix))]
-        if imported_runtime.is_some() {
+        // Local-PTY fd import died with the in-process terminal (WS0 stage C):
+        // termhost panes survive a handoff by the daemon reconnect + adopt path
+        // inside spawn (welcome.panes), so any fd-passed pane from an older herdr
+        // degrades to a fresh shell seeded with the snapshot history.
+        if let Some(imported) = imported_runtime {
             failed_imports += 1;
-            continue;
-        }
-
-        let runtime_result = {
             #[cfg(unix)]
-            if let Some(imported) = imported_runtime {
-                TerminalRuntime::from_handoff_fd(
-                    crate::handoff_runtime::ImportedHandoffRuntime {
-                        master_fd: imported.master_fd,
-                        state: imported.state.with_pane_id(*id),
-                    },
-                    runtime_context.scrollback_limit_bytes,
-                    crate::terminal_theme::TerminalTheme::default(),
-                    runtime_context.events.clone(),
-                    runtime_context.render_notify.clone(),
-                    runtime_context.render_dirty.clone(),
-                )
-            } else {
-                TerminalRuntime::spawn_with_initial_history(
-                    *id,
-                    rows,
-                    cols,
-                    cwd.clone(),
-                    runtime_context.scrollback_limit_bytes,
-                    crate::terminal_theme::TerminalTheme::default(),
-                    runtime_context.shell_config,
-                    startup.initial_history_ansi,
-                    runtime_context.events.clone(),
-                    runtime_context.render_notify.clone(),
-                    runtime_context.render_dirty.clone(),
-                    public_pane_id,
-                )
-            }
-
-            #[cfg(not(unix))]
             {
-                TerminalRuntime::spawn_with_initial_history(
-                    *id,
-                    rows,
-                    cols,
-                    cwd.clone(),
-                    runtime_context.scrollback_limit_bytes,
-                    crate::terminal_theme::TerminalTheme::default(),
-                    runtime_context.shell_config,
-                    startup.initial_history_ansi,
-                    runtime_context.events.clone(),
-                    runtime_context.render_notify.clone(),
-                    runtime_context.render_dirty.clone(),
-                    public_pane_id,
-                )
+                use std::os::fd::FromRawFd;
+                // SAFETY: the import path dup'd this fd for us and nothing else
+                // owns it; wrap it so it closes instead of leaking.
+                drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(imported.master_fd) });
             }
-        };
+            #[cfg(not(unix))]
+            let _ = imported;
+        }
+        let runtime_result = TerminalRuntime::spawn_with_initial_history(
+            *id,
+            rows,
+            cols,
+            cwd.clone(),
+            runtime_context.scrollback_limit_bytes,
+            crate::terminal_theme::TerminalTheme::default(),
+            runtime_context.shell_config,
+            startup.initial_history_ansi,
+            runtime_context.events.clone(),
+            runtime_context.render_notify.clone(),
+            runtime_context.render_dirty.clone(),
+            public_pane_id,
+        );
 
         match runtime_result {
             Ok(runtime) => {

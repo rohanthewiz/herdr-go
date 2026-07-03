@@ -380,6 +380,9 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
     explain(agent, screen_content)
 }
 
+/// Unused since WS0 stage C: screen-scan detection moved to the Go daemon
+/// (herdr-web internal/detect); delete with the detect-port workstream.
+#[allow(dead_code)]
 pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
     let Some(loaded) = load_manifest(agent) else {
         return false;

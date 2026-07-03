@@ -64,26 +64,6 @@ impl TerminalRuntime {
         self.0.handoff_history_ansi()
     }
 
-    #[cfg(unix)]
-    pub fn from_handoff_fd(
-        import: crate::handoff_runtime::ImportedHandoffRuntime,
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        events: mpsc::Sender<AppEvent>,
-        render_notify: Arc<Notify>,
-        render_dirty: Arc<AtomicBool>,
-    ) -> std::io::Result<Self> {
-        crate::pane::PaneRuntime::from_handoff_fd(
-            import,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            events,
-            render_notify,
-            render_dirty,
-        )
-        .map(Self)
-    }
-
     pub fn spawn(
         pane_id: PaneId,
         rows: u16,
@@ -218,13 +198,6 @@ impl TerminalRuntime {
 
     pub fn reset_agent_detection(&self) {
         self.0.reset_agent_detection();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn agent_detection_reset_notify_for_test(
-        &self,
-    ) -> std::sync::Arc<tokio::sync::Notify> {
-        self.0.agent_detection_reset_notify_for_test()
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {

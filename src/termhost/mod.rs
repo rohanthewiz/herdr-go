@@ -1,10 +1,9 @@
 //! The Go↔Rust orchestration seam from the Rust (orchestrator) side.
 //!
 //! Behind the `termhost` Cargo feature, which is **on by default** (WS0): the
-//! Go `termhost` daemon is the terminal backend, and an unreachable daemon is
-//! a hard error at pane creation (see [`required_backend`]). The transitional
-//! escape hatch `HERDR_TERMHOST_INPROCESS=1` forces the legacy in-process
-//! PTY + ghostty path until that path is deleted (WS0 stages C/D).
+//! Go `termhost` daemon is the *only* terminal backend, and an unreachable
+//! daemon is a hard error at pane creation (see [`required_client`]). The
+//! legacy in-process PTY + ghostty path was removed in WS0 stage C.
 //!
 //! See ai_docs/phase-b-orchestration-seam.md (in the herdr-web repo) for the
 //! protocol design.
@@ -34,11 +33,6 @@ pub const SOCKET_ENV_VAR: &str = "HERDR_TERMHOST_SOCKET";
 /// shutdown. This is the normal path — no hand-launch required.
 pub const BIN_ENV_VAR: &str = "HERDR_TERMHOST_BIN";
 
-/// Env var escape hatch (transitional — removed together with the in-process
-/// path in WS0 stage C): set to `1`/`true` to force the legacy in-process
-/// PTY + ghostty terminal instead of the termhost daemon.
-pub const INPROCESS_ENV_VAR: &str = "HERDR_TERMHOST_INPROCESS";
-
 /// Installed name of the Go daemon binary, discovered next to the herdr
 /// executable or on PATH when no env var names it.
 const DAEMON_BINARY_NAME: &str = "herdr-termhost";
@@ -53,7 +47,7 @@ const SPAWN_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The process-wide connection to the Go backend, established lazily on first
 /// use. `None` means the daemon could not be found/reached/spawned — a hard
-/// error at pane creation (see [`required_backend`]).
+/// error at pane creation (see [`required_client`]).
 static CLIENT: OnceLock<Option<Arc<TermhostClient>>> = OnceLock::new();
 
 /// A daemon this process spawned and is responsible for tearing down. Empty when
@@ -65,53 +59,19 @@ struct SpawnedDaemon {
     socket: PathBuf,
 }
 
-/// Returns the shared termhost client if the backend is reachable, connecting
-/// (and spawning the daemon if managed/discovered) on first call. Cached for
-/// the life of the process.
-pub(crate) fn client_if_enabled() -> Option<Arc<TermhostClient>> {
-    CLIENT.get_or_init(connect_backend).clone()
-}
-
-/// The backend decision for new panes under the termhost-by-default policy.
-pub(crate) enum BackendChoice {
-    /// Drive the pane through the Go daemon.
-    Termhost(Arc<TermhostClient>),
-    /// Legacy in-process PTY + ghostty path, forced via
-    /// `HERDR_TERMHOST_INPROCESS=1` (deleted in WS0 stage C).
-    InProcess,
-}
-
-/// Resolves the terminal backend, treating an unreachable/undiscoverable daemon
-/// as a **hard error** (WS0 stage A decision): termhost is the default backend,
-/// and silently falling back to the in-process emulator would hide daemon
-/// breakage. `HERDR_TERMHOST_INPROCESS=1` is the transitional escape hatch.
-pub(crate) fn required_backend() -> std::io::Result<BackendChoice> {
-    if inprocess_requested() {
-        return Ok(BackendChoice::InProcess);
-    }
-    // Unit tests keep exercising the legacy in-process path (their pre-flip
-    // behavior) until WS0 stage C6 rewrites them onto a termhost double; the
-    // hard-error policy itself is covered by tests/termhost_e2e.rs against the
-    // real binary.
-    #[cfg(test)]
-    {
-        Ok(BackendChoice::InProcess)
-    }
-    #[cfg(not(test))]
-    match client_if_enabled() {
-        Some(client) => Ok(BackendChoice::Termhost(client)),
+/// Returns the shared termhost client, connecting (and spawning the daemon if
+/// managed/discovered) on first call. Cached for the life of the process.
+/// An unreachable/undiscoverable daemon is a **hard error** (WS0 stage A
+/// decision): termhost is the only backend, and there is nothing to fall back
+/// to since the in-process emulator was deleted (WS0 stage C).
+pub(crate) fn required_client() -> std::io::Result<Arc<TermhostClient>> {
+    match CLIENT.get_or_init(connect_backend).clone() {
+        Some(client) => Ok(client),
         None => Err(std::io::Error::other(
             "termhost daemon unreachable: set HERDR_TERMHOST_BIN or HERDR_TERMHOST_SOCKET, \
-             install `herdr-termhost` next to herdr or on PATH, or set \
-             HERDR_TERMHOST_INPROCESS=1 for the legacy in-process terminal (see herdr.log)",
+             or install `herdr-termhost` next to herdr or on PATH (see herdr.log)",
         )),
     }
-}
-
-fn inprocess_requested() -> bool {
-    std::env::var(INPROCESS_ENV_VAR)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 /// After session restore, close any termhost pane the (reconnected) persistent daemon

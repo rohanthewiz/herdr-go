@@ -22,6 +22,9 @@ pub(crate) struct HandoffRuntimeState {
 
 #[cfg(unix)]
 impl HandoffRuntimeState {
+    /// Unused since WS0 stage C (fd import deleted); kept while the handoff
+    /// manifest still carries pane entries from older binaries.
+    #[allow(dead_code)]
     pub fn with_pane_id(mut self, pane_id: crate::layout::PaneId) -> Self {
         self.pane_id = pane_id.raw();
         self
@@ -32,6 +35,8 @@ impl HandoffRuntimeState {
 pub(crate) struct ImportedHandoffRuntime {
     #[cfg(unix)]
     pub master_fd: std::os::fd::RawFd,
+    /// Unread since WS0 stage C — restore respawns instead of importing.
     #[cfg(unix)]
+    #[allow(dead_code)]
     pub state: HandoffRuntimeState,
 }
