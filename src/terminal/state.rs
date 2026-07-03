@@ -961,6 +961,8 @@ impl TerminalState {
     }
 }
 
+// Unused since WS0 stage C (Rust detection task deleted).
+#[allow(dead_code)]
 pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection) -> AgentState {
     detection.state
 }
@@ -1955,13 +1957,22 @@ mod tests {
 
         // OSC title outranks the agent label (program title shows on the border).
         assert!(terminal.set_terminal_title(Some("vim - main.go".into())));
-        assert_eq!(terminal.border_label(true).as_deref(), Some("vim - main.go"));
+        assert_eq!(
+            terminal.border_label(true).as_deref(),
+            Some("vim - main.go")
+        );
         // It even shows when agent labels are disabled (it's chrome, not an agent label).
-        assert_eq!(terminal.border_label(false).as_deref(), Some("vim - main.go"));
+        assert_eq!(
+            terminal.border_label(false).as_deref(),
+            Some("vim - main.go")
+        );
 
         // Chosen precedence: OSC title sits ABOVE the manual label, so it shadows it.
         terminal.set_manual_label("reviewer".into());
-        assert_eq!(terminal.border_label(true).as_deref(), Some("vim - main.go"));
+        assert_eq!(
+            terminal.border_label(true).as_deref(),
+            Some("vim - main.go")
+        );
         // With the OSC title cleared, the manual label takes over.
         assert!(terminal.set_terminal_title(None));
         assert_eq!(terminal.border_label(true).as_deref(), Some("reviewer"));

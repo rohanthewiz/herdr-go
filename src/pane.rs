@@ -18,18 +18,14 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 
-mod cursor;
-mod input;
+#[cfg(test)]
+mod fake_terminal;
 #[cfg(feature = "termhost")]
 mod input_mirror;
 mod kitty_keyboard;
-mod osc;
 mod state;
 mod terminal;
-mod xtgettcap;
 
-#[cfg(test)]
-use self::terminal::GhosttyPaneTerminal;
 use self::terminal::PaneTerminal;
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
@@ -79,19 +75,15 @@ fn foreground_member_cwd_different_from_shell(
     None
 }
 
-#[cfg(unix)]
-/// Renders a termhost pane's accumulated grid into a ratatui frame, mirroring
-/// the conversion `GhosttyPaneTerminal::render` performs but from wire cells.
-#[cfg(feature = "termhost")]
-fn render_termhost_frame(
+/// Renders a wire-format frame snapshot into a ratatui frame — the shared
+/// conversion for termhost panes (daemon-reported frames) and the test fake.
+pub(crate) fn render_wire_frame(
     frame: &mut Frame,
     area: Rect,
     show_cursor: bool,
-    pane: &crate::termhost::TermhostPane,
+    snapshot: &crate::protocol::FrameData,
+    cursor: Option<&crate::protocol::CursorState>,
 ) {
-    let Some(snapshot) = pane.snapshot() else {
-        return;
-    };
     let width = snapshot.width as usize;
     {
         let buf = frame.buffer_mut();
@@ -111,7 +103,7 @@ fn render_termhost_frame(
         }
     }
     if show_cursor {
-        if let Some(cursor) = pane.cursor() {
+        if let Some(cursor) = cursor {
             if cursor.visible && cursor.x < area.width && cursor.y < area.height {
                 frame.set_cursor_position((area.x + cursor.x, area.y + cursor.y));
             }
@@ -119,19 +111,19 @@ fn render_termhost_frame(
     }
 }
 
-/// Builds a dirty patch from a termhost pane's snapshot when it has changed since
-/// the last collect. Rows are sized exactly to `area_width` (the compositor
+/// Builds a dirty patch from a frame snapshot when it has changed since the
+/// last collect. Rows are sized exactly to `area_width` (the compositor
 /// splices whole rows), padding/truncating against the backend grid as needed.
-#[cfg(feature = "termhost")]
-fn termhost_dirty_patch(
-    pane: &crate::termhost::TermhostPane,
+pub(crate) fn wire_dirty_patch(
+    dirty: bool,
+    snapshot: impl FnOnce() -> Option<crate::protocol::FrameData>,
     area_width: u16,
     area_height: u16,
 ) -> TerminalDirtyPatchOutcome {
-    if !pane.take_dirty() {
+    if !dirty {
         return TerminalDirtyPatchOutcome::Clean;
     }
-    let Some(snapshot) = pane.snapshot() else {
+    let Some(snapshot) = snapshot() else {
         return TerminalDirtyPatchOutcome::Clean;
     };
     let width = snapshot.width as usize;
@@ -144,9 +136,9 @@ fn termhost_dirty_patch(
                     .cells
                     .get((y as usize) * width + (x as usize))
                     .cloned()
-                    .unwrap_or_else(termhost_blank_cell)
+                    .unwrap_or_else(wire_blank_cell)
             } else {
-                termhost_blank_cell()
+                wire_blank_cell()
             };
             row.push(cell);
         }
@@ -155,8 +147,7 @@ fn termhost_dirty_patch(
     TerminalDirtyPatchOutcome::Patch(TerminalDirtyPatch { rows })
 }
 
-#[cfg(feature = "termhost")]
-fn termhost_blank_cell() -> crate::protocol::CellData {
+fn wire_blank_cell() -> crate::protocol::CellData {
     crate::protocol::CellData {
         symbol: " ".to_string(),
         fg: 0,
@@ -205,7 +196,8 @@ impl PaneRuntimeIo {
     fn termhost_pane(&self) -> Option<&Arc<crate::termhost::TermhostPane>> {
         match self {
             PaneRuntimeIo::Termhost(pane) => Some(pane),
-            _ => None,
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => None,
         }
     }
 
@@ -1380,7 +1372,9 @@ impl PaneRuntime {
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
         #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
-            render_termhost_frame(frame, area, show_cursor, pane);
+            if let Some(snapshot) = pane.snapshot() {
+                render_wire_frame(frame, area, show_cursor, &snapshot, pane.cursor().as_ref());
+            }
             return;
         }
         self.terminal.render(frame, area, show_cursor);
@@ -1393,7 +1387,12 @@ impl PaneRuntime {
     ) -> TerminalDirtyPatchOutcome {
         #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
-            return termhost_dirty_patch(pane, area_width, area_height);
+            return wire_dirty_patch(
+                pane.take_dirty(),
+                || pane.snapshot(),
+                area_width,
+                area_height,
+            );
         }
         self.terminal.collect_dirty_patch(area_width, area_height)
     }
@@ -1680,16 +1679,14 @@ impl PaneRuntime {
     ) -> (Self, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(channel_capacity);
         let (resize_tx, _resize_rx) = watch::channel((rows, cols, 0, 0));
-        let mut terminal =
-            crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes).unwrap();
-        terminal.write(bytes);
+        let terminal = PaneTerminal::new_fake(cols, rows, scrollback_limit_bytes);
+        let (feed_tx, _feed_rx) = mpsc::channel(1);
+        let _ = terminal.process_pty_bytes(PaneId::from_raw(0), 0, bytes, &feed_tx);
 
         (
             Self {
                 pane_id: PaneId::from_raw(0),
-                terminal: Arc::new(PaneTerminal::new(
-                    GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
-                )),
+                terminal: Arc::new(terminal),
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
                     resize_tx,
@@ -1941,27 +1938,8 @@ mod tests {
 
     #[tokio::test]
     async fn focus_events_are_forwarded_when_enabled() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
-        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        terminal
-            .mode_set(crate::ghostty::MODE_FOCUS_EVENT, true)
-            .unwrap();
-        let runtime = PaneRuntime {
-            pane_id: PaneId::from_raw(0),
-            terminal: Arc::new(PaneTerminal::new(
-                GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
-            )),
-            io: PaneRuntimeIo::TestChannel {
-                sender: tx,
-                resize_tx,
-            },
-            current_size: Cell::new((80, 24, 0, 0)),
-            child_pid: Arc::new(AtomicU32::new(0)),
-            reported_cwd: Arc::new(Mutex::new(None)),
-            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
-            preserve_processes_on_drop: true,
-        };
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
+        runtime.test_process_pty_bytes(b"\x1b[?1004h");
 
         assert!(runtime.try_send_focus_event(crate::terminal::types::FocusEvent::Gained));
         assert_eq!(rx.recv().await.unwrap(), Bytes::from_static(b"\x1b[I"));
@@ -1969,24 +1947,7 @@ mod tests {
 
     #[tokio::test]
     async fn focus_events_are_suppressed_when_disabled() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let (resize_tx, _resize_rx) = watch::channel((80, 24, 0, 0));
-        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
-        let runtime = PaneRuntime {
-            pane_id: PaneId::from_raw(0),
-            terminal: Arc::new(PaneTerminal::new(
-                GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap(),
-            )),
-            io: PaneRuntimeIo::TestChannel {
-                sender: tx,
-                resize_tx,
-            },
-            current_size: Cell::new((80, 24, 0, 0)),
-            child_pid: Arc::new(AtomicU32::new(0)),
-            reported_cwd: Arc::new(Mutex::new(None)),
-            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
-            preserve_processes_on_drop: true,
-        };
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(80, 24);
 
         assert!(!runtime.try_send_focus_event(crate::terminal::types::FocusEvent::Gained));
         assert!(

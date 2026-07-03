@@ -47,6 +47,8 @@ pub fn parse_default_color_response(sequence: &str) -> Option<(DefaultColorKind,
     Some((kind, parse_rgb_color(value)?))
 }
 
+/// Unused since WS0 stage C (the Go daemon owns pane theming).
+#[allow(dead_code)]
 pub fn osc_set_default_color_sequence(kind: DefaultColorKind, color: RgbColor) -> String {
     let command = match kind {
         DefaultColorKind::Foreground => 10,

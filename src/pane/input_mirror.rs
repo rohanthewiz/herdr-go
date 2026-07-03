@@ -9,10 +9,9 @@
 //! daemon reports (`PaneSignal::Modes`) and the pure-Rust encoders in
 //! `crate::input`.
 //!
-//! Parity with the ghostty-backed mirror is pinned by the differential tests
-//! at the bottom of this file (which drive both against the same reported
-//! modes) — they keep this honest until the in-process path is deleted (WS0
-//! stage D) and later WS9 moves encoding to Go.
+//! Parity with the (now deleted) ghostty-backed mirror was pinned by a
+//! differential test while both existed (WS0 stages B2..C); WS9 moves
+//! encoding to Go.
 
 use std::sync::Mutex;
 
@@ -140,6 +139,15 @@ impl InputMirror {
         }
     }
 
+    /// Test hook: mirrors DEC 2026 as parsed by the fake terminal. Prod
+    /// termhost panes get this via `apply_input_modes`.
+    #[cfg(test)]
+    pub(crate) fn set_synchronized_output(&self, active: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.synchronized_output = active;
+        }
+    }
+
     pub(crate) fn keyboard_protocol(&self) -> Option<crate::input::KeyboardProtocol> {
         let state = self.state.lock().ok()?;
         Some(crate::input::KeyboardProtocol::from_kitty_flags(
@@ -189,11 +197,36 @@ impl InputMirror {
         key: crate::input::TerminalKey,
         protocol: crate::input::KeyboardProtocol,
     ) -> Vec<u8> {
-        let application_cursor = self
+        let (application_cursor, modify_other_keys) = self
             .state
             .lock()
-            .map(|state| state.application_cursor)
-            .unwrap_or(false);
+            .map(|state| (state.application_cursor, state.modify_other_keys))
+            .unwrap_or((false, false));
+        // XTMODKEYS modifyOtherKeys: a modified Enter would collapse to a
+        // bare CR under the legacy encoding, so emit xterm's CSI 27 form
+        // (the shape the deleted ghostty encoder produced, pinned by the
+        // shift-enter routing test). Other keys keep the pure encoding
+        // until WS9 moves key encoding to Go.
+        if modify_other_keys
+            && matches!(protocol, crate::input::KeyboardProtocol::Legacy)
+            && key.code == crossterm::event::KeyCode::Enter
+            && !key.modifiers.is_empty()
+        {
+            let mods = key.modifiers;
+            let mut modifier = 1u8;
+            if mods.contains(KeyModifiers::SHIFT) {
+                modifier += 1;
+            }
+            if mods.contains(KeyModifiers::ALT) {
+                modifier += 2;
+            }
+            if mods.contains(KeyModifiers::CONTROL) {
+                modifier += 4;
+            }
+            if modifier > 1 {
+                return format!("\x1b[27;{modifier};13~").into_bytes();
+            }
+        }
         crate::input::encode_terminal_key_with_modes(key, protocol, application_cursor)
     }
 
@@ -289,154 +322,6 @@ fn mouse_protocol_encoding(encoding: u8) -> crate::input::MouseProtocolEncoding 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::termhost::PaneInputModes;
-
-    /// Builds the ghostty-backed mirror (an unfed emulator) the way termhost
-    /// panes did before B2, so we can differentially test parity.
-    fn ghostty_mirror() -> super::super::terminal::PaneTerminal {
-        let (response_tx, _rx) = tokio::sync::mpsc::channel(1);
-        let terminal = crate::ghostty::Terminal::new(80, 24, 10_000).unwrap();
-        let ghostty =
-            super::super::terminal::GhosttyPaneTerminal::new(terminal, response_tx).unwrap();
-        super::super::terminal::PaneTerminal::new(ghostty)
-    }
-
-    fn modes(mouse_mode: u8, mouse_encoding: u8, kitty_flags: u16) -> PaneInputModes {
-        PaneInputModes {
-            alternate_screen: mouse_mode.is_multiple_of(2),
-            application_cursor: mouse_mode >= 2,
-            bracketed_paste: true,
-            focus_reporting: mouse_mode >= 1,
-            mouse_mode,
-            mouse_encoding,
-            mouse_alternate_scroll: mouse_mode <= 2,
-            synchronized_output: mouse_mode == 3,
-            kitty_keyboard_flags: kitty_flags,
-        }
-    }
-
-    fn key(
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
-    ) -> crate::input::TerminalKey {
-        crossterm::event::KeyEvent::new(code, mods).into()
-    }
-
-    #[test]
-    fn mirror_matches_ghostty_mirror_state_and_encodings() {
-        use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
-
-        let key_matrix = [
-            key(KeyCode::Up, KeyModifiers::empty()),
-            key(KeyCode::Down, KeyModifiers::empty()),
-            key(KeyCode::Home, KeyModifiers::empty()),
-            key(KeyCode::Up, KeyModifiers::SHIFT),
-            key(KeyCode::Enter, KeyModifiers::empty()),
-            key(KeyCode::Backspace, KeyModifiers::empty()),
-            key(KeyCode::Esc, KeyModifiers::empty()),
-            key(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            key(KeyCode::Tab, KeyModifiers::empty()),
-            key(KeyCode::BackTab, KeyModifiers::SHIFT),
-            key(KeyCode::F(5), KeyModifiers::empty()),
-            key(KeyCode::PageUp, KeyModifiers::empty()),
-            key(KeyCode::Delete, KeyModifiers::CONTROL),
-        ];
-        let mouse_matrix = [
-            MouseEventKind::Down(MouseButton::Left),
-            MouseEventKind::Down(MouseButton::Right),
-            MouseEventKind::Up(MouseButton::Left),
-            MouseEventKind::Drag(MouseButton::Left),
-        ];
-        let wheel_matrix = [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown];
-
-        // Kitty flag coverage: 0 (off), 1 (disambiguate), 5 (disambiguate +
-        // report-alternate-keys) — the sets real programs push. Bits 2/8
-        // (report-event-types / report-all-keys-as-escape-codes) are a known
-        // divergence: the pure encoder degrades them to legacy-compatible
-        // output, as herdr's ghostty fallback path always has for text keys.
-        // WS9 (key encoding in Go) is where full protocol coverage lands.
-        for mouse_mode in 0..=4u8 {
-            for mouse_encoding in 0..=2u8 {
-                for kitty_flags in [0u16, 1, 5] {
-                    let reported = modes(mouse_mode, mouse_encoding, kitty_flags);
-                    let ghostty = ghostty_mirror();
-                    ghostty.apply_input_modes(&reported);
-                    let mirror = InputMirror::new();
-                    mirror.apply_input_modes(&reported);
-                    let case = format!(
-                        "mode={mouse_mode} encoding={mouse_encoding} kitty={kitty_flags}"
-                    );
-
-                    // Mode state parity.
-                    let g_state = ghostty.input_state().unwrap();
-                    let m_state = mirror.input_state().unwrap();
-                    assert_eq!(g_state, m_state, "input_state {case}");
-                    assert_eq!(
-                        ghostty.wheel_routing(),
-                        mirror.wheel_routing(),
-                        "wheel_routing {case}"
-                    );
-                    assert_eq!(
-                        ghostty.synchronized_output_active(),
-                        mirror.synchronized_output_active(),
-                        "synchronized_output {case}"
-                    );
-                    let fallback = crate::input::KeyboardProtocol::Legacy;
-                    assert_eq!(
-                        ghostty.keyboard_protocol(fallback),
-                        mirror.keyboard_protocol().unwrap_or(fallback),
-                        "keyboard_protocol {case}"
-                    );
-
-                    // Key encoding parity.
-                    let protocol = mirror.keyboard_protocol().unwrap();
-                    for key in key_matrix {
-                        assert_eq!(
-                            ghostty.encode_terminal_key(key, protocol),
-                            mirror.encode_terminal_key(key, protocol),
-                            "key {key:?} {case}"
-                        );
-                    }
-
-                    // Mouse encoding parity.
-                    for kind in mouse_matrix {
-                        assert_eq!(
-                            ghostty.encode_mouse_button(kind, 10, 5, KeyModifiers::empty()),
-                            mirror.encode_mouse_button(kind, 10, 5, KeyModifiers::empty()),
-                            "mouse {kind:?} {case}"
-                        );
-                        assert_eq!(
-                            ghostty.encode_mouse_button(kind, 10, 5, KeyModifiers::SHIFT),
-                            mirror.encode_mouse_button(kind, 10, 5, KeyModifiers::SHIFT),
-                            "mouse+shift {kind:?} {case}"
-                        );
-                    }
-                    assert_eq!(
-                        ghostty.encode_mouse_motion(
-                            MouseEventKind::Moved,
-                            10,
-                            5,
-                            KeyModifiers::empty()
-                        ),
-                        mirror.encode_mouse_motion(
-                            MouseEventKind::Moved,
-                            10,
-                            5,
-                            KeyModifiers::empty()
-                        ),
-                        "motion {case}"
-                    );
-                    for kind in wheel_matrix {
-                        assert_eq!(
-                            ghostty.encode_mouse_wheel(kind, 10, 5, KeyModifiers::empty()),
-                            mirror.encode_mouse_wheel(kind, 10, 5, KeyModifiers::empty()),
-                            "wheel {kind:?} {case}"
-                        );
-                    }
-                }
-            }
-        }
-    }
 
     #[test]
     fn handoff_seed_round_trips_kitty_state() {

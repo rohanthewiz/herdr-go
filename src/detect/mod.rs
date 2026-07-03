@@ -130,6 +130,9 @@ pub fn parse_agent_label(agent: &str) -> Option<Agent> {
 
 /// Identify which agent is running from the process name.
 /// Returns `None` for plain shells or unrecognized programs.
+/// Unused since WS0 stage C: process-probe identification moved to the Go
+/// daemon (herdr-web internal/detect); delete with the detect-port workstream.
+#[allow(dead_code)]
 pub fn identify_agent(process_name: &str) -> Option<Agent> {
     let name = normalized_agent_lookup_name(process_name);
     // Match against known binary names
@@ -155,6 +158,9 @@ pub fn identify_agent(process_name: &str) -> Option<Agent> {
     }
 }
 
+/// Unused since WS0 stage C: process-probe identification moved to the Go
+/// daemon (herdr-web internal/detect); delete with the detect-port workstream.
+#[allow(dead_code)]
 pub fn identify_agent_in_job(job: &crate::platform::ForegroundJob) -> Option<(Agent, String)> {
     if let Some(process) = job
         .processes

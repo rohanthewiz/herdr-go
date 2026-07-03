@@ -1,3 +1,6 @@
+//! In-process libghostty-vt FFI bindings for the deleted local terminal path.
+//! Unreferenced since WS0 stage C (the Go daemon owns VT emulation); module,
+//! tests, and the Zig build are deleted in stage D.
 #![allow(dead_code)]
 
 #[allow(
