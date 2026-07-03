@@ -339,6 +339,11 @@ impl App {
             .get(&terminal_id)
             .map(|runtime| runtime.current_size())
             .unwrap_or_else(|| self.state.estimate_pane_size());
+        // Drop the exited runtime BEFORE spawning the replacement: both use the
+        // same pane id in the daemon's namespace, and the old handle's drop
+        // sends close_pane — sequenced after the new spawn it would tear down
+        // the freshly created pane instead of the dead one.
+        drop(self.terminal_runtimes.remove(&terminal_id));
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,

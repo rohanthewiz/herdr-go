@@ -52,6 +52,8 @@ pub struct PaneInputModes {
     pub mouse_alternate_scroll: bool,
     pub synchronized_output: bool,
     pub kitty_keyboard_flags: u16,
+    /// xterm XTMODKEYS modifyOtherKeys (CSI >4;Nm).
+    pub modify_other_keys: bool,
 }
 
 /// Per-pane callback the owner installs to receive [`PaneSignal`]s. Invoked on the
@@ -146,7 +148,9 @@ impl PaneGrid {
         for y in 0..height.min(self.rows) {
             for x in 0..width.min(cols) {
                 let idx = y as usize * cols as usize + x as usize;
-                let Some(cell) = self.cells.get(idx) else { continue };
+                let Some(cell) = self.cells.get(idx) else {
+                    continue;
+                };
                 let Some(h) = cell.hyperlink else { continue };
                 if let Some(uri) = self.hyperlinks.get(h as usize) {
                     links.push((
@@ -196,6 +200,11 @@ pub struct TermhostClient {
     /// restart/handoff. Restore reconciles its session against this: a restored pane
     /// whose ID is here is adopted (not re-created).
     surviving_panes: Vec<u32>,
+    /// Surviving pane IDs not yet claimed by an adoption. Each ID is adoptable
+    /// exactly once: a later spawn with a recycled pane id (e.g. the shell
+    /// respawn after the adopted process exits) must create a fresh daemon
+    /// pane, not re-adopt the dead one.
+    unclaimed_surviving: Mutex<Vec<u32>>,
 }
 
 /// Parameters for spawning a pane on the backend.
@@ -224,7 +233,9 @@ impl TermhostClient {
 
         proto::write_command(
             &mut writer,
-            &Command::Hello { protocol_version: proto::PROTOCOL_VERSION },
+            &Command::Hello {
+                protocol_version: proto::PROTOCOL_VERSION,
+            },
         )?;
         let surviving_panes = match proto::read_event(&mut reader)? {
             Event::Welcome { error, .. } if !error.is_empty() => {
@@ -242,6 +253,7 @@ impl TermhostClient {
         let client = Arc::new(TermhostClient {
             writer: Mutex::new(writer),
             panes: Mutex::new(HashMap::new()),
+            unclaimed_surviving: Mutex::new(surviving_panes.clone()),
             surviving_panes,
         });
 
@@ -259,6 +271,51 @@ impl TermhostClient {
         Ok(client)
     }
 
+    /// Reconnects to the daemon and resumes event flow over the existing
+    /// client, keeping every registered [`TermhostPane`] handle valid. Used
+    /// when a live handoff fails after [`Self::detach_for_handoff`] already
+    /// dropped the connection: the rolled-back server must reclaim the daemon
+    /// or its panes go dark. Ends with a resync request per pane so frames
+    /// and input modes replay.
+    pub fn reattach(self: &Arc<Self>, path: &str) -> io::Result<()> {
+        let stream = UnixStream::connect(path)?;
+        let mut writer = stream.try_clone()?;
+        let mut reader = stream;
+        proto::write_command(
+            &mut writer,
+            &Command::Hello {
+                protocol_version: proto::PROTOCOL_VERSION,
+            },
+        )?;
+        match proto::read_event(&mut reader)? {
+            Event::Welcome { error, .. } if !error.is_empty() => {
+                return Err(io::Error::other(format!("welcome error: {error}")))
+            }
+            Event::Welcome { .. } => {}
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected welcome, got {other:?}"),
+                ))
+            }
+        }
+        *self.writer.lock().unwrap() = writer;
+        let weak = Arc::downgrade(self);
+        thread::Builder::new()
+            .name("termhost-reader".into())
+            .spawn(move || {
+                while let Ok(ev) = proto::read_event(&mut reader) {
+                    let Some(client) = weak.upgrade() else { break };
+                    client.handle_event(ev);
+                }
+            })?;
+        let pane_ids: Vec<u32> = self.panes.lock().unwrap().keys().copied().collect();
+        for pane_id in pane_ids {
+            let _ = self.send(&Command::RequestResync { pane_id });
+        }
+        Ok(())
+    }
+
     fn handle_event(&self, ev: Event) {
         match ev {
             Event::PaneFrame { pane_id, frame } => {
@@ -273,10 +330,21 @@ impl TermhostClient {
                     }
                 }
             }
-            Event::PaneAgent { pane_id, agent, state, visible_blocker, visible_working } => {
+            Event::PaneAgent {
+                pane_id,
+                agent,
+                state,
+                visible_blocker,
+                visible_working,
+            } => {
                 if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     if let Some(sink) = &pane.sink {
-                        sink(PaneSignal::Agent { agent, state, visible_blocker, visible_working });
+                        sink(PaneSignal::Agent {
+                            agent,
+                            state,
+                            visible_blocker,
+                            visible_working,
+                        });
                     }
                 }
             }
@@ -321,6 +389,7 @@ impl TermhostClient {
                 mouse_alternate_scroll,
                 synchronized_output,
                 kitty_keyboard_flags,
+                modify_other_keys,
             } => {
                 if let Some(pane) = self.panes.lock().unwrap().get(&pane_id).cloned() {
                     if let Some(sink) = &pane.sink {
@@ -334,6 +403,7 @@ impl TermhostClient {
                             mouse_alternate_scroll,
                             synchronized_output,
                             kitty_keyboard_flags,
+                            modify_other_keys,
                         }));
                     }
                 }
@@ -355,6 +425,20 @@ impl TermhostClient {
     /// matching panes are adopted, not re-created.
     pub fn surviving_panes(&self) -> &[u32] {
         &self.surviving_panes
+    }
+
+    /// Atomically claims a surviving pane for adoption. Returns true exactly
+    /// once per pane ID; later spawns with the same ID (shell respawn after
+    /// the adopted process exited) create a fresh daemon pane instead.
+    pub fn claim_surviving_pane(&self, pane_id: u32) -> bool {
+        let mut unclaimed = self.unclaimed_surviving.lock().unwrap();
+        match unclaimed.iter().position(|id| *id == pane_id) {
+            Some(index) => {
+                unclaimed.swap_remove(index);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Closes any surviving daemon pane this herdr did NOT adopt or create during
@@ -399,7 +483,11 @@ impl TermhostClient {
         // Register before requesting the resync so the replayed events route here.
         self.panes.lock().unwrap().insert(pane_id, state.clone());
         self.send(&Command::RequestResync { pane_id })?;
-        Ok(TermhostPane { client: self.clone(), id: pane_id, state })
+        Ok(TermhostPane {
+            client: self.clone(),
+            id: pane_id,
+            state,
+        })
     }
 
     /// Spawns a pane on the backend and returns a handle to it. `sink` receives
@@ -416,7 +504,10 @@ impl TermhostClient {
             pending_selection: Mutex::new(None),
             pending_text: Mutex::new(None),
         });
-        self.panes.lock().unwrap().insert(spec.pane_id, state.clone());
+        self.panes
+            .lock()
+            .unwrap()
+            .insert(spec.pane_id, state.clone());
 
         self.send(&Command::CreatePane {
             pane_id: spec.pane_id,
@@ -431,7 +522,11 @@ impl TermhostClient {
             initial_history: spec.initial_history,
         })?;
 
-        Ok(TermhostPane { client: self.clone(), id: spec.pane_id, state })
+        Ok(TermhostPane {
+            client: self.clone(),
+            id: spec.pane_id,
+            state,
+        })
     }
 
     /// Tells a persistent daemon to exit and tear down its panes (clean herdr quit).
@@ -491,7 +586,10 @@ impl TermhostPane {
     /// positive = toward the live bottom). The backend clamps and reports the new
     /// position on the next frame.
     pub fn scroll(&self, delta: i32) {
-        let _ = self.client.send(&Command::ScrollViewport { pane_id: self.id, delta });
+        let _ = self.client.send(&Command::ScrollViewport {
+            pane_id: self.id,
+            delta,
+        });
     }
 
     /// Returns the latest scrollback position reported by the backend.
@@ -542,8 +640,14 @@ impl TermhostPane {
             .client
             .send(&Command::RequestSelection {
                 pane_id: self.id,
-                anchor: proto::SelectionPoint { row: anchor_row, col: anchor_col },
-                cursor: proto::SelectionPoint { row: cursor_row, col: cursor_col },
+                anchor: proto::SelectionPoint {
+                    row: anchor_row,
+                    col: anchor_col,
+                },
+                cursor: proto::SelectionPoint {
+                    row: cursor_row,
+                    col: cursor_col,
+                },
                 rectangle,
             })
             .is_err()
@@ -568,13 +672,25 @@ impl TermhostPane {
     /// soft-wrap rejoining. Returns `None` on send failure or timeout. The local
     /// emulator is unfed for termhost panes, so this round-trip is the only way to
     /// read their text.
-    pub fn extract_text_blocking(&self, scope: u8, lines: u32, ansi: bool, unwrap: bool) -> Option<String> {
+    pub fn extract_text_blocking(
+        &self,
+        scope: u8,
+        lines: u32,
+        ansi: bool,
+        unwrap: bool,
+    ) -> Option<String> {
         let (tx, rx) = mpsc::channel();
         *self.state.pending_text.lock().unwrap() = Some(tx);
 
         if self
             .client
-            .send(&Command::RequestText { pane_id: self.id, scope, lines, ansi, unwrap })
+            .send(&Command::RequestText {
+                pane_id: self.id,
+                scope,
+                lines,
+                ansi,
+                unwrap,
+            })
             .is_err()
         {
             *self.state.pending_text.lock().unwrap() = None;
@@ -599,7 +715,10 @@ const SEAM_REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl TerminalBackend for TermhostPane {
     fn write_input(&self, bytes: &[u8]) {
-        let _ = self.client.send(&Command::Input { pane_id: self.id, data: bytes.to_vec() });
+        let _ = self.client.send(&Command::Input {
+            pane_id: self.id,
+            data: bytes.to_vec(),
+        });
     }
 
     fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
@@ -664,7 +783,7 @@ mod tests {
             write_frame(&mut conn, r#"{"type":"welcome","protocol_version":1}"#);
             let _create = read_frame(&mut conn); // CreatePane
             let req = read_frame(&mut conn); // RequestSelection
-            // Echo back proof the request reached us, then reply with the text.
+                                             // Echo back proof the request reached us, then reply with the text.
             let req: serde_json::Value = serde_json::from_slice(&req).unwrap();
             assert_eq!(req["type"], "request_selection");
             assert_eq!(req["anchor"]["row"], 0);
@@ -677,7 +796,15 @@ mod tests {
 
         let client = TermhostClient::connect(path.to_str().unwrap()).unwrap();
         let pane = client
-            .create_pane(PaneSpec { pane_id: 1, cols: 40, rows: 5, ..Default::default() }, None)
+            .create_pane(
+                PaneSpec {
+                    pane_id: 1,
+                    cols: 40,
+                    rows: 5,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
 
         let text = pane.extract_selection_blocking(0, 0, 0, 4, false);
@@ -706,7 +833,7 @@ mod tests {
                 r#"{"type":"welcome","protocol_version":1,"panes":[1,2,3]}"#,
             );
             let _resync = read_frame(&mut conn); // request_resync for the adopted pane (2)
-            // close_orphans should now close 1 and 3 (not the adopted 2), in order.
+                                                 // close_orphans should now close 1 and 3 (not the adopted 2), in order.
             let mut closed = Vec::new();
             for _ in 0..2 {
                 let cmd: serde_json::Value =
@@ -748,12 +875,23 @@ mod tests {
             assert_eq!(req["scope"], 1); // recent
             assert_eq!(req["unwrap"], true);
             assert!(req.get("lines").is_none()); // 0 omitted → whole buffer
-            write_frame(&mut conn, r#"{"type":"pane_text","pane_id":1,"text":"row1\nrow2"}"#);
+            write_frame(
+                &mut conn,
+                r#"{"type":"pane_text","pane_id":1,"text":"row1\nrow2"}"#,
+            );
         });
 
         let client = TermhostClient::connect(path.to_str().unwrap()).unwrap();
         let pane = client
-            .create_pane(PaneSpec { pane_id: 1, cols: 40, rows: 5, ..Default::default() }, None)
+            .create_pane(
+                PaneSpec {
+                    pane_id: 1,
+                    cols: 40,
+                    rows: 5,
+                    ..Default::default()
+                },
+                None,
+            )
             .unwrap();
 
         let text = pane.extract_text_blocking(super::proto::TEXT_SCOPE_RECENT, 0, false, true);

@@ -176,6 +176,9 @@ pub struct PaneRuntime {
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     preserve_processes_on_drop: bool,
+    /// True when this runtime adopted a live shell surviving in the persistent
+    /// daemon (restart/handoff reconnect) instead of spawning a fresh one.
+    adopted_live_shell: bool,
 }
 
 enum PaneRuntimeIo {
@@ -337,10 +340,14 @@ pub enum WheelRouting {
 
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
-        self.io.shutdown();
-        if !self.preserve_processes_on_drop {
-            shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire), None);
+        // Preserved runtimes (handoff export, failed-handoff import rollback,
+        // test doubles) must not close the daemon-side pane: closing it kills
+        // the very shell being preserved for the session's continuing owner.
+        if self.preserve_processes_on_drop {
+            return;
         }
+        self.io.shutdown();
+        shutdown_pane_processes(self.pane_id, self.child_pid.load(Ordering::Acquire), None);
     }
 }
 
@@ -647,6 +654,14 @@ impl PaneRuntime {
         self.io.is_termhost()
     }
 
+    /// Whether this runtime adopted a live shell that survived in the
+    /// persistent daemon across a herdr restart or live handoff. Such panes
+    /// still host their original process, so launch-argv respawn semantics
+    /// carry over (the successor to the fd-import marker).
+    pub fn adopted_live_shell(&self) -> bool {
+        self.adopted_live_shell
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.io.duplicate_handoff_fd()
@@ -946,7 +961,9 @@ impl PaneRuntime {
                 // If a persistent daemon survived a herdr restart/handoff and still has
                 // this pane (reported in welcome.panes), adopt the live shell instead of
                 // spawning a fresh one — that's how termhost shells survive a restart.
-                let adopt = client.surviving_panes().contains(&pane_id.raw());
+                // Claiming is one-shot: a respawn with a recycled pane id after the
+                // adopted process exits must create a fresh shell.
+                let adopt = client.claim_surviving_pane(pane_id.raw());
                 Self::finish_termhost(
                     pane_id,
                     rows,
@@ -1127,6 +1144,7 @@ impl PaneRuntime {
             reported_cwd,
             kitty_keyboard_flags,
             preserve_processes_on_drop: false,
+            adopted_live_shell: adopt,
         })
     }
 
@@ -1696,6 +1714,7 @@ impl PaneRuntime {
                 reported_cwd: Arc::new(Mutex::new(None)),
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 preserve_processes_on_drop: true,
+                adopted_live_shell: false,
             },
             rx,
         )

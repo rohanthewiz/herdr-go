@@ -26,6 +26,11 @@ impl TerminalRuntime {
         self.0.is_termhost()
     }
 
+    /// See [`crate::pane::PaneRuntime::adopted_live_shell`].
+    pub fn adopted_live_shell(&self) -> bool {
+        self.0.adopted_live_shell()
+    }
+
     #[cfg(unix)]
     pub fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         self.0.duplicate_handoff_fd()

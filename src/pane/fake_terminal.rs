@@ -647,7 +647,7 @@ impl FakePaneTerminal {
                 mouse_encoding: modes.mouse_encoding,
                 mouse_alternate_scroll: modes.mouse_alternate_scroll,
                 synchronized_output: modes.synchronized_output,
-                modify_other_keys: screen.modes.modify_other_keys,
+                modify_other_keys: modes.modify_other_keys,
             };
         }
         self.mirror.apply_input_modes(modes);

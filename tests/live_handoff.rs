@@ -74,9 +74,10 @@ fn spawn_server_with_env(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    // Pin the legacy in-process terminal: these suites exercise server/API
-    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
-    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
+    // The spawned server drives panes through the Go termhost daemon — the
+    // only terminal backend since WS0 stage C. Pin the binary explicitly so
+    // sibling discovery can't drift under test parallelism.
+    cmd.env("HERDR_TERMHOST_BIN", support::termhost_daemon_bin());
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -120,9 +121,10 @@ fn spawn_named_session_server(
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    // Pin the legacy in-process terminal: these suites exercise server/API
-    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
-    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
+    // The spawned server drives panes through the Go termhost daemon — the
+    // only terminal backend since WS0 stage C. Pin the binary explicitly so
+    // sibling discovery can't drift under test parallelism.
+    cmd.env("HERDR_TERMHOST_BIN", support::termhost_daemon_bin());
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -157,9 +159,10 @@ fn spawn_default_session_server(config_home: &Path, runtime_dir: &Path) -> Spawn
         })
         .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    // Pin the legacy in-process terminal: these suites exercise server/API
-    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
-    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
+    // The spawned server drives panes through the Go termhost daemon — the
+    // only terminal backend since WS0 stage C. Pin the binary explicitly so
+    // sibling discovery can't drift under test parallelism.
+    cmd.env("HERDR_TERMHOST_BIN", support::termhost_daemon_bin());
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -431,7 +434,7 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn live_server_holds_one_pty_master_fd_per_pane() {
+fn live_server_holds_no_pty_master_fds() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -459,7 +462,9 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
         .as_str()
         .unwrap()
         .to_string();
-    wait_for_server_ptmx_fd_count(server_pid, 1, Duration::from_secs(5));
+    // The pane's PTY lives in the Go termhost daemon (WS0 stage C); the
+    // herdr server process must not hold any PTY master fds.
+    wait_for_server_ptmx_fd_count(server_pid, 0, Duration::from_secs(5));
 
     let second = request(
         &api_socket,
@@ -478,7 +483,7 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
         .as_str()
         .unwrap()
         .to_string();
-    wait_for_server_ptmx_fd_count(server_pid, 2, Duration::from_secs(5));
+    wait_for_server_ptmx_fd_count(server_pid, 0, Duration::from_secs(5));
 
     assert_ok(request(
         &api_socket,
@@ -492,7 +497,7 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
             }
         }),
     ));
-    wait_for_server_ptmx_fd_count(server_pid, 3, Duration::from_secs(5));
+    wait_for_server_ptmx_fd_count(server_pid, 0, Duration::from_secs(5));
 
     assert_ok(request(
         &api_socket,
@@ -501,7 +506,7 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
     let replacement_pid =
         wait_for_replacement_server_pid(&runtime_dir, server_pid, Duration::from_secs(10));
     wait_for_api(&api_socket, Duration::from_secs(10));
-    wait_for_server_ptmx_fd_count(replacement_pid, 3, Duration::from_secs(5));
+    wait_for_server_ptmx_fd_count(replacement_pid, 0, Duration::from_secs(5));
 
     let _ = request(
         &api_socket,

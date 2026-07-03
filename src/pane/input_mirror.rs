@@ -46,8 +46,8 @@ struct MirrorState {
     mouse_encoding: u8,
     mouse_alternate_scroll: bool,
     synchronized_output: bool,
-    /// XTMODKEYS modifyOtherKeys, only restorable from a handoff snapshot —
-    /// the Go daemon does not report it (yet; revisit in WS9).
+    /// XTMODKEYS modifyOtherKeys, reported by the Go daemon's raw-stream
+    /// scanner (WS0 stage C6).
     modify_other_keys: bool,
     /// Kitty keyboard protocol register + push/pop stack, shared with the
     /// in-process path (pure Rust). Fed absolutely by reported modes and by
@@ -82,6 +82,7 @@ impl InputMirror {
         state.mouse_encoding = modes.mouse_encoding;
         state.mouse_alternate_scroll = modes.mouse_alternate_scroll;
         state.synchronized_output = modes.synchronized_output;
+        state.modify_other_keys = modes.modify_other_keys;
         state
             .kitty_keyboard
             .observe(format!("\x1b[={};1u", modes.kitty_keyboard_flags).as_bytes());

@@ -699,6 +699,16 @@ impl App {
         self.terminal_runtimes.assume_handoff_ownership();
     }
 
+    /// Releases every pane runtime without closing its daemon-side pane. Used
+    /// when a handoff import aborts before commit: the old server rolls back,
+    /// reattaches to the persistent daemon, and still owns these live shells.
+    #[cfg(unix)]
+    pub fn preserve_runtimes_for_failed_handoff(&mut self) {
+        for (_, runtime) in self.terminal_runtimes.drain_for_handoff() {
+            runtime.preserve_for_handoff();
+        }
+    }
+
     fn request_full_redraw(&mut self) {
         self.full_redraw_pending = true;
     }

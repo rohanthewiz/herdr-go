@@ -215,6 +215,10 @@ pub enum Event {
         synchronized_output: bool,
         #[serde(default)]
         kitty_keyboard_flags: u16,
+        /// xterm XTMODKEYS modifyOtherKeys (CSI >4;Nm), scanned Go-side from
+        /// the raw stream (libghostty-vt does not surface it).
+        #[serde(default)]
+        modify_other_keys: bool,
     },
     PaneExited {
         pane_id: u32,
@@ -273,7 +277,9 @@ fn b64_serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
 
 fn b64_deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
     let s = String::deserialize(d)?;
-    STANDARD.decode(s.as_bytes()).map_err(serde::de::Error::custom)
+    STANDARD
+        .decode(s.as_bytes())
+        .map_err(serde::de::Error::custom)
 }
 
 fn invalid<E: std::fmt::Display>(e: E) -> io::Error {
@@ -310,7 +316,10 @@ mod tests {
 
     #[test]
     fn input_data_is_base64() {
-        let cmd = Command::Input { pane_id: 1, data: b"hi".to_vec() };
+        let cmd = Command::Input {
+            pane_id: 1,
+            data: b"hi".to_vec(),
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""data":"aGk=""#), "{json}");
         assert!(json.contains(r#""type":"input""#), "{json}");
@@ -351,7 +360,10 @@ mod tests {
             initial_history: "line1\r\nline2\r\n".to_string(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains(r#""initial_history":"line1\r\nline2\r\n""#), "{json}");
+        assert!(
+            json.contains(r#""initial_history":"line1\r\nline2\r\n""#),
+            "{json}"
+        );
     }
 
     #[test]
@@ -392,7 +404,10 @@ mod tests {
 
     #[test]
     fn scroll_viewport_command_serializes() {
-        let cmd = Command::ScrollViewport { pane_id: 9, delta: -5 };
+        let cmd = Command::ScrollViewport {
+            pane_id: 9,
+            delta: -5,
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"scroll_viewport""#), "{json}");
         assert!(json.contains(r#""pane_id":9"#), "{json}");
@@ -509,7 +524,8 @@ mod tests {
     #[test]
     fn pane_selection_decodes() {
         let ev: Event =
-            serde_json::from_str(r#"{"type":"pane_selection","pane_id":4,"text":"HELLO"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"pane_selection","pane_id":4,"text":"HELLO"}"#)
+                .unwrap();
         match ev {
             Event::PaneSelection { pane_id, text } => {
                 assert_eq!(pane_id, 4);
@@ -521,8 +537,7 @@ mod tests {
 
     #[test]
     fn pane_selection_defaults_empty_text() {
-        let ev: Event =
-            serde_json::from_str(r#"{"type":"pane_selection","pane_id":4}"#).unwrap();
+        let ev: Event = serde_json::from_str(r#"{"type":"pane_selection","pane_id":4}"#).unwrap();
         match ev {
             Event::PaneSelection { pane_id, text } => {
                 assert_eq!(pane_id, 4);
@@ -552,7 +567,8 @@ mod tests {
     #[test]
     fn pane_text_decodes() {
         let ev: Event =
-            serde_json::from_str(r#"{"type":"pane_text","pane_id":7,"text":"row1\nrow2"}"#).unwrap();
+            serde_json::from_str(r#"{"type":"pane_text","pane_id":7,"text":"row1\nrow2"}"#)
+                .unwrap();
         match ev {
             Event::PaneText { pane_id, text } => {
                 assert_eq!(pane_id, 7);
@@ -591,7 +607,11 @@ mod tests {
     fn welcome_decodes_with_default_error() {
         let ev: Event = serde_json::from_str(r#"{"type":"welcome","protocol_version":1}"#).unwrap();
         match ev {
-            Event::Welcome { protocol_version, error, panes } => {
+            Event::Welcome {
+                protocol_version,
+                error,
+                panes,
+            } => {
                 assert_eq!(protocol_version, 1);
                 assert!(error.is_empty());
                 assert!(panes.is_empty()); // omitted → default empty (fresh daemon)

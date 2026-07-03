@@ -689,6 +689,40 @@ fn process_exists(pid: libc::pid_t) -> bool {
     }
 }
 
+
+/// Resolves the Go `termhost` daemon binary for integration-spawned herdr
+/// servers — the only terminal backend since WS0 stage C. Order:
+/// `HERDR_TERMHOST_BIN`, then a `herdr-termhost` (or dev `termhost`) binary
+/// next to the herdr binary under test. Panics with build instructions when
+/// none is found: these suites cannot run without the daemon, and silently
+/// skipping would gut them.
+pub fn termhost_daemon_bin() -> String {
+    if let Ok(bin) = std::env::var("HERDR_TERMHOST_BIN") {
+        if !bin.is_empty() {
+            return bin;
+        }
+    }
+    let herdr = Path::new(env!("CARGO_BIN_EXE_herdr"));
+    if let Some(dir) = herdr.parent() {
+        for name in ["herdr-termhost", "termhost"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    panic!(
+        "integration tests need the Go termhost daemon: build it from the herdr-web repo \
+         (PKG_CONFIG_PATH=<herdr>/vendor/libghostty-vt/zig-out/share/pkgconfig \
+         go build -tags ghostty -o {}/herdr-termhost ./cmd/termhost) \
+         or set HERDR_TERMHOST_BIN",
+        herdr
+            .parent()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,3 +778,4 @@ mod tests {
         );
     }
 }
+

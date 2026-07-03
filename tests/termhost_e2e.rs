@@ -44,7 +44,10 @@ fn unique_test_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/herdr-termhost-e2e-{}-{nanos}", std::process::id()))
+    PathBuf::from(format!(
+        "/tmp/herdr-termhost-e2e-{}-{nanos}",
+        std::process::id()
+    ))
 }
 
 struct SpawnedHerdr {
@@ -82,10 +85,19 @@ fn spawn_server(
     fs::create_dir_all(config_home.join("herdr")).unwrap();
     fs::create_dir_all(runtime_dir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(config_home.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
@@ -103,7 +115,10 @@ fn spawn_server(
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
 
-    SpawnedHerdr { _master: Some(pair.master), child }
+    SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    }
 }
 
 /// Like [`spawn_server`] but in *managed* mode: instead of attaching to a
@@ -121,10 +136,19 @@ fn spawn_server_managed(
     fs::create_dir_all(runtime_dir).unwrap();
     fs::create_dir_all(tmpdir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(config_home.join("herdr/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
@@ -144,14 +168,21 @@ fn spawn_server_managed(
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
 
-    SpawnedHerdr { _master: Some(pair.master), child }
+    SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    }
 }
 
 /// The persistent daemon's session-keyed socket: `data_dir()/herdr-termhost.sock`.
 /// In a debug test build `app_dir_name()` is `herdr-dev`; with no `HERDR_SESSION`
 /// the data dir is just the config dir.
 fn termhost_socket_path(config_home: &Path, session: Option<&str>) -> PathBuf {
-    let app_dir = if cfg!(debug_assertions) { "herdr-dev" } else { "herdr" };
+    let app_dir = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
     let mut dir = config_home.join(app_dir);
     if let Some(name) = session {
         dir = dir.join("sessions").join(name);
@@ -164,13 +195,17 @@ fn termhost_socket_path(config_home: &Path, session: Option<&str>) -> PathBuf {
 /// (it deliberately outlives the herdr that spawned it). Also exercises the real
 /// shutdown command over a socket. No-op if nothing is listening.
 fn termhost_send_shutdown(socket: &Path) {
-    let Ok(mut stream) = UnixStream::connect(socket) else { return };
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return;
+    };
     for msg in [
         r#"{"type":"hello","protocol_version":1}"#,
         r#"{"type":"shutdown"}"#,
     ] {
         let bytes = msg.as_bytes();
-        if stream.write_all(&(bytes.len() as u32).to_le_bytes()).is_err()
+        if stream
+            .write_all(&(bytes.len() as u32).to_le_bytes())
+            .is_err()
             || stream.write_all(bytes).is_err()
         {
             return;
@@ -207,11 +242,24 @@ fn spawn_server_managed_session(
     fs::create_dir_all(runtime_dir).unwrap();
     fs::create_dir_all(tmpdir).unwrap();
     register_runtime_dir(runtime_dir);
-    fs::write(config_home.join("herdr/config.toml"), "onboarding = false\n").unwrap();
-    fs::write(config_home.join("herdr-dev/config.toml"), "onboarding = false\n").unwrap();
+    fs::write(
+        config_home.join("herdr/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
+    fs::write(
+        config_home.join("herdr-dev/config.toml"),
+        "onboarding = false\n",
+    )
+    .unwrap();
 
     let pair = native_pty_system()
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
@@ -231,7 +279,10 @@ fn spawn_server_managed_session(
     register_spawned_herdr_pid(child.process_id());
     drop(pair.slave);
 
-    SpawnedHerdr { _master: Some(pair.master), child }
+    SpawnedHerdr {
+        _master: Some(pair.master),
+        child,
+    }
 }
 
 /// Polls `pane.read` (served from the Go buffer over the seam) until the pane's
@@ -269,7 +320,12 @@ fn send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) 
 /// error instead of panicking. Used while the API socket is mid-rebind (e.g. during
 /// a live handoff, when the old server removes the socket and the replacement is
 /// still binding it).
-fn try_send_json_request(socket_path: &Path, id: &str, method: &str, params: Value) -> Option<Value> {
+fn try_send_json_request(
+    socket_path: &Path,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> Option<Value> {
     let mut stream = UnixStream::connect(socket_path).ok()?;
     let request = json!({ "id": id, "method": method, "params": params });
     writeln!(stream, "{request}").ok()?;
@@ -396,11 +452,21 @@ fn termhost_pane_renders_shell_output_to_client() {
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Create a workspace; its root pane spawns on the Go termhost backend.
-    let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "e2e" }));
-    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "e2e" }),
+    );
+    assert!(
+        create.get("error").is_none(),
+        "workspace.create failed: {create}"
+    );
     let workspace_id = create["result"]["workspace"]["workspace_id"]
         .as_str()
-        .unwrap_or_else(|| panic!("workspace.create should return workspace.workspace_id: {create}"))
+        .unwrap_or_else(|| {
+            panic!("workspace.create should return workspace.workspace_id: {create}")
+        })
         .to_string();
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
@@ -416,11 +482,13 @@ fn termhost_pane_renders_shell_output_to_client() {
         "workspace.focus",
         json!({ "workspace_id": workspace_id }),
     );
-    assert!(focus.get("error").is_none(), "workspace.focus failed: {focus}");
+    assert!(
+        focus.get("error").is_none(),
+        "workspace.focus failed: {focus}"
+    );
 
     // Attach a client to receive rendered frames for the active workspace.
-    let mut stream =
-        UnixStream::connect(&client_socket).expect("should connect to client socket");
+    let mut stream = UnixStream::connect(&client_socket).expect("should connect to client socket");
     let (version, error) =
         client_handshake(&mut stream, 13, 80, 24).expect("handshake should succeed");
     assert_eq!(version, 13, "server should report protocol version 13");
@@ -469,12 +537,20 @@ fn termhost_pane_renders_shell_output_to_client() {
         "pane.send_text",
         json!({ "pane_id": pane_id, "text": format!("{osc7}\n") }),
     );
-    assert!(resp.get("error").is_none(), "pane.send_text (osc7) failed: {resp}");
+    assert!(
+        resp.get("error").is_none(),
+        "pane.send_text (osc7) failed: {resp}"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got_cwd = String::new();
     while Instant::now() < deadline {
-        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        let info = send_json_request(
+            &api_socket,
+            "get",
+            "pane.get",
+            json!({ "pane_id": pane_id }),
+        );
         if let Some(cwd) = info["result"]["pane"]["cwd"].as_str() {
             got_cwd = cwd.to_string();
             if cwd == "/tmp" {
@@ -518,17 +594,30 @@ fn termhost_pane_survives_client_reattach() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    let create =
-        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "reattach" }));
-    let workspace_id = create["result"]["workspace"]["workspace_id"].as_str().unwrap().to_string();
-    let pane_id = create["result"]["root_pane"]["pane_id"].as_str().unwrap().to_string();
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "reattach" }),
+    );
+    let workspace_id = create["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = create["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let focus = send_json_request(
         &api_socket,
         "focus",
         "workspace.focus",
         json!({ "workspace_id": workspace_id }),
     );
-    assert!(focus.get("error").is_none(), "workspace.focus failed: {focus}");
+    assert!(
+        focus.get("error").is_none(),
+        "workspace.focus failed: {focus}"
+    );
 
     // Client 1: drive a first marker, then detach (drop the socket).
     {
@@ -587,7 +676,9 @@ fn termhost_managed_daemon_is_persistent_and_survives_herdr_death() {
     let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP termhost managed: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            eprintln!(
+                "SKIP termhost managed: set HERDR_TERMHOST_BIN to the built Go termhost binary"
+            );
             return;
         }
     };
@@ -603,15 +694,27 @@ fn termhost_managed_daemon_is_persistent_and_survives_herdr_death() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    let spawned =
-        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
+    let spawned = spawn_server_managed(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &daemon_bin,
+        &tmpdir,
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     // Create a workspace → herdr lazily spawns the managed daemon for the root pane.
-    let create =
-        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "managed" }));
-    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "managed" }),
+    );
+    assert!(
+        create.get("error").is_none(),
+        "workspace.create failed: {create}"
+    );
 
     // The persistent daemon binds the session-keyed socket once herdr spawns it for
     // the pane — proof the orchestrator launched and connected to a daemon it manages.
@@ -655,7 +758,9 @@ fn termhost_clean_server_quit_stops_daemon() {
     let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP termhost clean-quit: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            eprintln!(
+                "SKIP termhost clean-quit: set HERDR_TERMHOST_BIN to the built Go termhost binary"
+            );
             return;
         }
     };
@@ -671,12 +776,25 @@ fn termhost_clean_server_quit_stops_daemon() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    let spawned =
-        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
-    let herdr_pid = spawned.child.process_id().expect("herdr should report a pid");
+    let spawned = spawn_server_managed(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &daemon_bin,
+        &tmpdir,
+    );
+    let herdr_pid = spawned
+        .child
+        .process_id()
+        .expect("herdr should report a pid");
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
-    send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "clean" }));
+    send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "clean" }),
+    );
     let managed_socket = termhost_socket_path(&config_home, None);
     assert!(
         wait_until_exists(&managed_socket, Duration::from_secs(10)),
@@ -715,7 +833,9 @@ fn termhost_pane_survives_herdr_restart() {
     let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP termhost restart: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            eprintln!(
+                "SKIP termhost restart: set HERDR_TERMHOST_BIN to the built Go termhost binary"
+            );
             return;
         }
     };
@@ -729,18 +849,30 @@ fn termhost_pane_survives_herdr_restart() {
     let runtime_dir = base.join("runtime");
     let tmpdir = base.join("tmp");
     let session = "persist";
-    let app_dir = if cfg!(debug_assertions) { "herdr-dev" } else { "herdr" };
+    let app_dir = if cfg!(debug_assertions) {
+        "herdr-dev"
+    } else {
+        "herdr"
+    };
     let session_dir = config_home.join(app_dir).join("sessions").join(session);
     let api_socket = session_dir.join("herdr.sock");
     let termhost_socket = session_dir.join("herdr-termhost.sock");
     let session_file = session_dir.join("session.json");
 
     // --- herdr A: create a pane, run a marker, let the session save ---
-    let herdr_a = spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
+    let herdr_a =
+        spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
     wait_for_socket(&api_socket, Duration::from_secs(10));
-    let create =
-        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "persist" }));
-    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "persist" }),
+    );
+    assert!(
+        create.get("error").is_none(),
+        "workspace.create failed: {create}"
+    );
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
@@ -775,7 +907,8 @@ fn termhost_pane_survives_herdr_restart() {
     );
 
     // --- herdr B: restore the session, reconnect to the daemon, adopt the shell ---
-    let herdr_b = spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
+    let herdr_b =
+        spawn_server_managed_session(&config_home, &runtime_dir, &daemon_bin, &tmpdir, session);
     wait_for_socket(&api_socket, Duration::from_secs(10));
 
     // The pre-restart output is still in the SAME shell's buffer — the daemon kept
@@ -822,7 +955,9 @@ fn termhost_pane_survives_live_handoff() {
     let daemon_bin = match std::env::var("HERDR_TERMHOST_BIN") {
         Ok(p) if !p.is_empty() => p,
         _ => {
-            eprintln!("SKIP termhost handoff: set HERDR_TERMHOST_BIN to the built Go termhost binary");
+            eprintln!(
+                "SKIP termhost handoff: set HERDR_TERMHOST_BIN to the built Go termhost binary"
+            );
             return;
         }
     };
@@ -839,14 +974,26 @@ fn termhost_pane_survives_live_handoff() {
     let client_socket = runtime_dir.join("herdr-client.sock");
 
     // --- herdr A: managed daemon + a termhost-backed pane, run a marker ---
-    let herdr_a =
-        spawn_server_managed(&config_home, &runtime_dir, &api_socket, &daemon_bin, &tmpdir);
+    let herdr_a = spawn_server_managed(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &daemon_bin,
+        &tmpdir,
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    let create =
-        send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "handoff" }));
-    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "handoff" }),
+    );
+    assert!(
+        create.get("error").is_none(),
+        "workspace.create failed: {create}"
+    );
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
@@ -873,12 +1020,7 @@ fn termhost_pane_survives_live_handoff() {
     // --- live handoff: herdr A spawns its replacement (same binary) and hands over ---
     // The replacement inherits A's environment (XDG_CONFIG_HOME, TMPDIR, HERDR_SOCKET_PATH,
     // HERDR_TERMHOST_BIN), so it rebinds the same API socket and resolves the same daemon.
-    let handoff = send_json_request(
-        &api_socket,
-        "handoff",
-        "server.live_handoff",
-        json!({}),
-    );
+    let handoff = send_json_request(&api_socket, "handoff", "server.live_handoff", json!({}));
     assert!(
         handoff.get("error").is_none(),
         "live handoff should succeed even with a termhost pane present (it owns no PTY \
@@ -950,8 +1092,16 @@ fn termhost_pane_reports_agent_identity() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &termhost_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
 
-    let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "ag" }));
-    assert!(create.get("error").is_none(), "workspace.create failed: {create}");
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "ag" }),
+    );
+    assert!(
+        create.get("error").is_none(),
+        "workspace.create failed: {create}"
+    );
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
@@ -971,7 +1121,12 @@ fn termhost_pane_reports_agent_identity() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got_agent = String::new();
     while Instant::now() < deadline {
-        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        let info = send_json_request(
+            &api_socket,
+            "get",
+            "pane.get",
+            json!({ "pane_id": pane_id }),
+        );
         if let Some(agent) = info["result"]["pane"]["agent"].as_str() {
             got_agent = agent.to_string();
             if agent == "claude" {
@@ -1013,7 +1168,12 @@ fn termhost_pane_reports_agent_working_state() {
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &termhost_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
 
-    let create = send_json_request(&api_socket, "ws", "workspace.create", json!({ "label": "wk" }));
+    let create = send_json_request(
+        &api_socket,
+        "ws",
+        "workspace.create",
+        json!({ "label": "wk" }),
+    );
     let pane_id = create["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap_or_else(|| panic!("no root_pane.pane_id: {create}"))
@@ -1032,9 +1192,16 @@ fn termhost_pane_reports_agent_working_state() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last = json!(null);
     while Instant::now() < deadline {
-        let info = send_json_request(&api_socket, "get", "pane.get", json!({ "pane_id": pane_id }));
+        let info = send_json_request(
+            &api_socket,
+            "get",
+            "pane.get",
+            json!({ "pane_id": pane_id }),
+        );
         let agent = info["result"]["pane"]["agent"].as_str().unwrap_or("");
-        let status = info["result"]["pane"]["agent_status"].as_str().unwrap_or("");
+        let status = info["result"]["pane"]["agent_status"]
+            .as_str()
+            .unwrap_or("");
         last = info["result"]["pane"].clone();
         if agent == "pi" && status == "working" {
             drop(spawned);

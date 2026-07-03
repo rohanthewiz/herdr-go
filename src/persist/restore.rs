@@ -576,7 +576,12 @@ fn restore_tab(
             Ok(runtime) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
-                if was_imported {
+                // A pane whose original process is still alive — adopted from
+                // the persistent daemon after a restart/handoff (or fd-imported
+                // by an older binary) — keeps its launch-argv respawn contract:
+                // when that process eventually exits, respawn a shell instead
+                // of closing the pane.
+                if was_imported || runtime.adopted_live_shell() {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
                     }
@@ -612,15 +617,8 @@ fn restore_tab(
                 if let Some(key) = startup.reserved_agent_session.as_deref() {
                     resumed_agent_sessions.remove(key);
                 }
-                if was_imported {
-                    failed_imports += 1;
-                    error!(
-                        tab = ?snap.custom_name,
-                        pane_id = id.raw(),
-                        err = %e,
-                        "failed to restore imported pane"
-                    );
-                }
+                // (imported panes were already counted as failed imports
+                // when their fd was discarded above)
                 error!(
                     tab = ?snap.custom_name,
                     pane_id = id.raw(),

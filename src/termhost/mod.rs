@@ -102,6 +102,28 @@ pub(crate) fn detach_for_handoff() {
     }
 }
 
+/// Reattaches to the persistent daemon after a live handoff fails and rolls
+/// back: [`detach_for_handoff`] already dropped the connection so the
+/// replacement could adopt, and without reclaiming it every termhost pane in
+/// the rolled-back server goes dark. Peeks the already-initialized client only.
+#[cfg(unix)]
+pub(crate) fn reattach_after_failed_handoff() {
+    let Some(Some(client)) = CLIENT.get() else {
+        return;
+    };
+    let socket = std::env::var(SOCKET_ENV_VAR)
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(managed_socket_path);
+    let socket = socket.to_string_lossy().into_owned();
+    match client.reattach(&socket) {
+        Ok(()) => tracing::info!(socket, "reattached to termhost daemon after failed handoff"),
+        Err(err) => tracing::error!(socket, error = %err,
+            "failed to reattach to termhost daemon after failed handoff"),
+    }
+}
+
 fn connect_backend() -> Option<Arc<TermhostClient>> {
     // Dev/manual: attach to a hand-launched daemon at a known socket.
     if let Some(path) = std::env::var(SOCKET_ENV_VAR).ok().filter(|p| !p.is_empty()) {

@@ -121,9 +121,10 @@ fn spawn_server(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    // Pin the legacy in-process terminal: these suites exercise server/API
-    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
-    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
+    // The spawned server drives panes through the Go termhost daemon — the
+    // only terminal backend since WS0 stage C. Pin the binary explicitly so
+    // sibling discovery can't drift under test parallelism.
+    cmd.env("HERDR_TERMHOST_BIN", support::termhost_daemon_bin());
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -558,9 +559,10 @@ fn duplicate_server_start_fails_gracefully() {
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
-    // Pin the legacy in-process terminal: these suites exercise server/API
-    // behavior, not the termhost backend (WS0 stage-C6 rewires them).
-    cmd.env("HERDR_TERMHOST_INPROCESS", "1");
+    // The spawned server drives panes through the Go termhost daemon — the
+    // only terminal backend since WS0 stage C. Pin the binary explicitly so
+    // sibling discovery can't drift under test parallelism.
+    cmd.env("HERDR_TERMHOST_BIN", support::termhost_daemon_bin());
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);

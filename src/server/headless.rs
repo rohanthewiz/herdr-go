@@ -1102,6 +1102,11 @@ impl HeadlessServer {
                 runtime.set_handoff_reader_paused(false);
             }
         }
+        // The pre-handoff detach freed the daemon's attach slot for the
+        // replacement; on rollback this server keeps running, so reclaim the
+        // daemon connection or every termhost pane goes dark.
+        #[cfg(feature = "termhost")]
+        crate::termhost::reattach_after_failed_handoff();
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
     }
@@ -3769,23 +3774,38 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // restored session doesn't reference.
         #[cfg(feature = "termhost")]
         crate::termhost::close_restored_orphans();
-        crate::server::handoff::report_restored(&mut received.stream)?;
-        if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
-            return Err(io::Error::other(
-                "test handoff import failure after restored",
-            ));
-        }
-        wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
-
-        let api_server = api::start_server(api_tx.clone(), event_hub.clone())?;
+        // Any abort between restore and commit leaves the OLD server owning
+        // the session (it rolls back and reattaches to the daemon), so this
+        // import must release its adopted panes without closing them.
+        let pre_ready = (|| {
+            crate::server::handoff::report_restored(&mut received.stream)?;
+            if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
+                return Err(io::Error::other(
+                    "test handoff import failure after restored",
+                ));
+            }
+            wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+            api::start_server(api_tx.clone(), event_hub.clone())
+        })();
+        let api_server = match pre_ready {
+            Ok(api_server) => api_server,
+            Err(err) => {
+                app.preserve_runtimes_for_failed_handoff();
+                return Err(err);
+            }
+        };
         let mut server = HeadlessServer::new(
             app,
             &loaded_config.diagnostics,
             Some(api_tx.clone()),
             Some(api_server),
         )?;
-        crate::server::handoff::report_ready(&mut received.stream)?;
-        crate::server::handoff::wait_committed(&mut received.stream)?;
+        let committed = crate::server::handoff::report_ready(&mut received.stream)
+            .and_then(|()| crate::server::handoff::wait_committed(&mut received.stream));
+        if let Err(err) = committed {
+            server.app.preserve_runtimes_for_failed_handoff();
+            return Err(err);
+        }
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;
