@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use portable_pty::CommandBuilder;
+use crate::pane::CommandBuilder;
 use serde_json::{json, Map, Value};
 
 use crate::layout::PaneId;

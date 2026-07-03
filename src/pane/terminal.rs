@@ -83,17 +83,14 @@ pub(crate) struct ProcessBytesResult {
 /// A pane's local terminal-side state: mirrored input modes + pure encoders
 /// for a live termhost pane, or the test double.
 pub(crate) enum PaneTerminal {
-    #[cfg(feature = "termhost")]
     Mirror(super::input_mirror::InputMirror),
     #[cfg(test)]
     Fake(super::fake_terminal::FakePaneTerminal),
 }
 
-#[cfg(feature = "termhost")]
 type Mirror = super::input_mirror::InputMirror;
 
 impl PaneTerminal {
-    #[cfg(feature = "termhost")]
     #[cfg_attr(test, allow(dead_code))] // real spawn tail is cfg'd out of test builds
     pub(crate) fn new_mirror() -> Self {
         Self::Mirror(Mirror::new())
@@ -121,7 +118,6 @@ impl PaneTerminal {
     /// or the fake's embedded mirror (same type, same code paths).
     fn input_mirror(&self) -> &super::input_mirror::InputMirror {
         match self {
-            #[cfg(feature = "termhost")]
             Self::Mirror(mirror) => mirror,
             #[cfg(test)]
             Self::Fake(fake) => fake.mirror(),
@@ -208,7 +204,6 @@ impl PaneTerminal {
         self.input_mirror().input_state()
     }
 
-    #[cfg(feature = "termhost")]
     pub fn apply_input_modes(&self, modes: &crate::termhost::PaneInputModes) {
         match self {
             Self::Mirror(mirror) => mirror.apply_input_modes(modes),

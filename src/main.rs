@@ -53,7 +53,6 @@ mod client;
 mod config;
 mod detect;
 mod events;
-mod ghostty;
 mod handoff_runtime;
 mod input;
 mod integration;
@@ -66,7 +65,6 @@ mod persist;
 mod platform;
 mod product_announcements;
 mod protocol;
-mod pty;
 mod raw_input;
 mod release_notes;
 mod remote;
@@ -75,11 +73,10 @@ mod selection;
 mod server;
 mod session;
 mod sound;
+mod termhost;
 mod terminal;
 mod terminal_notify;
 mod terminal_theme;
-#[cfg(feature = "termhost")]
-mod termhost;
 mod ui;
 mod update;
 mod workspace;
@@ -738,7 +735,6 @@ fn main() -> io::Result<()> {
     rt.shutdown_timeout(std::time::Duration::from_millis(100));
 
     // Tear down a termhost daemon we spawned (no-op otherwise).
-    #[cfg(feature = "termhost")]
     crate::termhost::shutdown();
 
     logging::shutdown("app");

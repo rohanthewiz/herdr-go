@@ -7,7 +7,6 @@ use std::sync::{
 };
 
 use bytes::Bytes;
-use portable_pty::CommandBuilder;
 use ratatui::{layout::Rect, Frame};
 #[cfg(test)]
 use tokio::sync::watch;
@@ -18,14 +17,15 @@ use crate::detect::{Agent, AgentState};
 use crate::events::AppEvent;
 use crate::layout::PaneId;
 
+mod command;
 #[cfg(test)]
 mod fake_terminal;
-#[cfg(feature = "termhost")]
 mod input_mirror;
 mod kitty_keyboard;
 mod state;
 mod terminal;
 
+pub(crate) use self::command::CommandBuilder;
 use self::terminal::PaneTerminal;
 pub(crate) use self::terminal::{TerminalDirtyPatch, TerminalDirtyPatchOutcome};
 pub use self::{
@@ -182,7 +182,6 @@ pub struct PaneRuntime {
 }
 
 enum PaneRuntimeIo {
-    #[cfg(feature = "termhost")]
     Termhost(Arc<crate::termhost::TermhostPane>),
     /// Test double (WS0 stage C): input bytes land on `sender`, resizes on
     /// `resize_tx`; the paired [`PaneTerminal::Fake`] answers content queries.
@@ -195,7 +194,6 @@ enum PaneRuntimeIo {
 
 impl PaneRuntimeIo {
     /// The Go-backend pane handle, when this runtime is backed by termhost.
-    #[cfg(feature = "termhost")]
     fn termhost_pane(&self) -> Option<&Arc<crate::termhost::TermhostPane>> {
         match self {
             PaneRuntimeIo::Termhost(pane) => Some(pane),
@@ -206,7 +204,6 @@ impl PaneRuntimeIo {
 
     fn shutdown(&self) {
         match self {
-            #[cfg(feature = "termhost")]
             PaneRuntimeIo::Termhost(pane) => {
                 use crate::termhost::TerminalBackend;
                 pane.close();
@@ -221,20 +218,12 @@ impl PaneRuntimeIo {
     /// persistent daemon and adopting the live shell, not by local-PTY fd passing —
     /// so the handoff machinery skips them.
     fn is_termhost(&self) -> bool {
-        #[cfg(feature = "termhost")]
-        {
-            matches!(self, PaneRuntimeIo::Termhost(_))
-        }
-        #[cfg(not(feature = "termhost"))]
-        {
-            false
-        }
+        matches!(self, PaneRuntimeIo::Termhost(_))
     }
 
     #[cfg(unix)]
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
-            #[cfg(feature = "termhost")]
             PaneRuntimeIo::Termhost(_) => Err(std::io::Error::other(
                 "termhost backend has no PTY master fd",
             )),
@@ -281,7 +270,6 @@ impl PaneRuntimeIo {
         // the Rust-side `terminal_responses` are empty post-emulator.
         let _ = &terminal_responses;
         match self {
-            #[cfg(feature = "termhost")]
             PaneRuntimeIo::Termhost(pane) => {
                 use crate::termhost::TerminalBackend;
                 pane.resize(rows, cols, cell_width_px, cell_height_px);
@@ -306,7 +294,6 @@ impl PaneRuntimeIo {
 
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
-            #[cfg(feature = "termhost")]
             PaneRuntimeIo::Termhost(pane) => {
                 use crate::termhost::TerminalBackend;
                 pane.write_input(&bytes);
@@ -319,7 +306,6 @@ impl PaneRuntimeIo {
 
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
-            #[cfg(feature = "termhost")]
             PaneRuntimeIo::Termhost(pane) => {
                 use crate::termhost::TerminalBackend;
                 pane.write_input(&bytes);
@@ -941,42 +927,30 @@ impl PaneRuntime {
             let _ = (scrollback_limit_bytes, host_terminal_theme);
             let _ = (&render_notify, &render_dirty);
 
-            #[cfg(not(feature = "termhost"))]
-            {
-                let _ = (rows, cols, cmd, events, initial_state);
-                error!(pane = pane_id.raw(), "{spawn_error_message}");
-                Err(io::Error::other(
-                "this herdr build has no terminal backend (built without the `termhost` feature)",
-            ))
-            }
-
-            #[cfg(feature = "termhost")]
-            {
-                let client = crate::termhost::required_client().inspect_err(|err| {
-                    error!(pane = pane_id.raw(), err = %err,
+            let client = crate::termhost::required_client().inspect_err(|err| {
+                error!(pane = pane_id.raw(), err = %err,
                     "{spawn_error_message}: termhost backend required but unavailable");
-                })?;
-                let terminal = Arc::new(PaneTerminal::new_mirror());
-                let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
-                // If a persistent daemon survived a herdr restart/handoff and still has
-                // this pane (reported in welcome.panes), adopt the live shell instead of
-                // spawning a fresh one — that's how termhost shells survive a restart.
-                // Claiming is one-shot: a respawn with a recycled pane id after the
-                // adopted process exits must create a fresh shell.
-                let adopt = client.claim_surviving_pane(pane_id.raw());
-                Self::finish_termhost(
-                    pane_id,
-                    rows,
-                    cols,
-                    terminal,
-                    kitty_keyboard_flags,
-                    cmd,
-                    client,
-                    events,
-                    initial_state.history_ansi,
-                    adopt,
-                )
-            }
+            })?;
+            let terminal = Arc::new(PaneTerminal::new_mirror());
+            let kitty_keyboard_flags = Arc::new(AtomicU16::new(0));
+            // If a persistent daemon survived a herdr restart/handoff and still has
+            // this pane (reported in welcome.panes), adopt the live shell instead of
+            // spawning a fresh one — that's how termhost shells survive a restart.
+            // Claiming is one-shot: a respawn with a recycled pane id after the
+            // adopted process exits must create a fresh shell.
+            let adopt = client.claim_surviving_pane(pane_id.raw());
+            Self::finish_termhost(
+                pane_id,
+                rows,
+                cols,
+                terminal,
+                kitty_keyboard_flags,
+                cmd,
+                client,
+                events,
+                initial_state.history_ansi,
+                adopt,
+            )
         }
     }
 
@@ -985,7 +959,6 @@ impl PaneRuntime {
     /// unfed (emulator-derived queries return empty); display, input, resize, and
     /// exit flow through the Go backend. Richer features (detection text,
     /// selection, scrollback, hyperlinks) await the Go→Rust passthrough events.
-    #[cfg(feature = "termhost")]
     #[allow(clippy::too_many_arguments)]
     // In test builds the only caller (the real spawn tail) is cfg'd out.
     #[cfg_attr(test, allow(dead_code))]
@@ -1199,7 +1172,6 @@ impl PaneRuntime {
 
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             pane.scroll(-(lines.min(i32::MAX as usize) as i32));
             return;
@@ -1209,7 +1181,6 @@ impl PaneRuntime {
 
     /// Scroll down by N lines (toward live output).
     pub fn scroll_down(&self, lines: usize) {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             pane.scroll(lines.min(i32::MAX as usize) as i32);
             return;
@@ -1219,7 +1190,6 @@ impl PaneRuntime {
 
     /// Reset scroll to live view (offset = 0).
     pub fn scroll_reset(&self) {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             pane.scroll(i32::MAX); // a large positive delta; the Go side clamps to the bottom
             return;
@@ -1229,7 +1199,6 @@ impl PaneRuntime {
 
     /// Set scrollback offset measured from the live bottom of the terminal.
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             // Convert the absolute target to a delta from the last reported offset.
             // Seam delta is positive=down (toward bottom), so delta = current - target.
@@ -1242,7 +1211,6 @@ impl PaneRuntime {
     }
 
     pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             return pane.scroll_metrics().map(|m| ScrollMetrics {
                 offset_from_bottom: m.offset_from_bottom,
@@ -1261,7 +1229,6 @@ impl PaneRuntime {
         if !show_cursor {
             return None;
         }
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             let cursor = pane.cursor()?;
             if cursor.x >= area.width || cursor.y >= area.height {
@@ -1294,14 +1261,12 @@ impl PaneRuntime {
     /// emulator is unfed); `None` for in-process panes or on failure. `lines`
     /// saturates to u32 — usize::MAX (snapshot_history) lands above the buffer size,
     /// which the Go side reads as "whole buffer".
-    #[cfg(feature = "termhost")]
     fn termhost_text(&self, scope: u8, lines: usize, ansi: bool, unwrap: bool) -> Option<String> {
         let pane = self.io.termhost_pane()?;
         pane.extract_text_blocking(scope, lines.min(u32::MAX as usize) as u32, ansi, unwrap)
     }
 
     pub fn visible_text(&self) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, false, false) {
             return t;
         }
@@ -1309,7 +1274,6 @@ impl PaneRuntime {
     }
 
     pub fn visible_ansi(&self) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, true, false) {
             return t;
         }
@@ -1319,7 +1283,6 @@ impl PaneRuntime {
     pub fn detection_text(&self) -> String {
         // Go owns detection for termhost panes; this read-API source maps to the
         // visible screen text.
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_VISIBLE, 0, false, false) {
             return t;
         }
@@ -1335,7 +1298,6 @@ impl PaneRuntime {
     }
 
     pub fn recent_text(&self, lines: usize) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, false, false)
         {
             return t;
@@ -1344,7 +1306,6 @@ impl PaneRuntime {
     }
 
     pub fn recent_ansi(&self, lines: usize) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, true, false)
         {
             return t;
@@ -1353,7 +1314,6 @@ impl PaneRuntime {
     }
 
     pub fn recent_unwrapped_text(&self, lines: usize) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, false, true)
         {
             return t;
@@ -1362,7 +1322,6 @@ impl PaneRuntime {
     }
 
     pub fn recent_unwrapped_ansi(&self, lines: usize) -> String {
-        #[cfg(feature = "termhost")]
         if let Some(t) = self.termhost_text(crate::termhost::TEXT_SCOPE_RECENT, lines, true, true) {
             return t;
         }
@@ -1378,7 +1337,6 @@ impl PaneRuntime {
         // Termhost panes keep an unfed local emulator, so read the selection from
         // the Go backend with a blocking request/response over the seam. This serves
         // every selection path uniformly (drag copy, double-click word, URL detect).
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             let ((anchor_row, anchor_col), (cursor_row, cursor_col)) = selection.ordered_cells();
             return pane
@@ -1388,7 +1346,6 @@ impl PaneRuntime {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, show_cursor: bool) {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             if let Some(snapshot) = pane.snapshot() {
                 render_wire_frame(frame, area, show_cursor, &snapshot, pane.cursor().as_ref());
@@ -1403,7 +1360,6 @@ impl PaneRuntime {
         area_width: u16,
         area_height: u16,
     ) -> TerminalDirtyPatchOutcome {
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             return wire_dirty_patch(
                 pane.take_dirty(),
@@ -1418,7 +1374,6 @@ impl PaneRuntime {
     pub fn visible_hyperlinks(&self, area: Rect) -> Vec<((u16, u16), String, String)> {
         // Termhost panes keep an unfed local emulator; resolve links from the
         // Go-fed frame grid (which carries the OSC 8 URI table) instead.
-        #[cfg(feature = "termhost")]
         if let Some(pane) = self.io.termhost_pane() {
             return pane.visible_hyperlinks(area.x, area.y, area.width, area.height);
         }

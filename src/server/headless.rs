@@ -894,7 +894,6 @@ impl HeadlessServer {
         // the slot until the replacement is ready, but the replacement can't adopt until
         // the slot frees). Detaching does NOT close panes; later close_pane sends from our
         // dropping termhost runtimes hit the dead socket and are harmless no-ops.
-        #[cfg(feature = "termhost")]
         crate::termhost::detach_for_handoff();
 
         let mut handoff_entries = Vec::new();
@@ -1105,7 +1104,6 @@ impl HeadlessServer {
         // The pre-handoff detach freed the daemon's attach slot for the
         // replacement; on rollback this server keeps running, so reclaim the
         // daemon connection or every termhost pane goes dark.
-        #[cfg(feature = "termhost")]
         crate::termhost::reattach_after_failed_handoff();
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
@@ -3659,7 +3657,6 @@ pub fn run_server() -> io::Result<()> {
         // Reconcile against a reconnected persistent termhost daemon: close any live
         // shells it kept that our restored session doesn't reference (drift from a
         // prior crash), so they don't leak until the daemon's idle timeout.
-        #[cfg(feature = "termhost")]
         crate::termhost::close_restored_orphans();
 
         // Create the headless server.
@@ -3690,7 +3687,6 @@ pub fn run_server() -> io::Result<()> {
         // linger to its idle timeout. A handoff is NOT a clean quit: the replacement
         // server reconnects and adopts the daemon's panes, so leave it running. A
         // crash skips this entirely (the block never returns), so the daemon survives.
-        #[cfg(feature = "termhost")]
         if !server.handed_off {
             crate::termhost::shutdown();
         }
@@ -3772,7 +3768,6 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         // Same reconciliation as the normal startup path: a handoff-import herdr
         // reconnects to the surviving daemon and adopts its panes, so close any the
         // restored session doesn't reference.
-        #[cfg(feature = "termhost")]
         crate::termhost::close_restored_orphans();
         // Any abort between restore and commit leaves the OLD server owning
         // the session (it rolls back and reattaches to the daemon), so this

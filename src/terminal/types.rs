@@ -24,6 +24,9 @@ pub fn encode_focus(event: FocusEvent) -> Vec<u8> {
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+// Rgb/Png are unconstructed until kitty graphics flow over the termhost seam
+// (the in-process producer was deleted in WS0 stage D); the vocabulary stays.
+#[allow(dead_code)]
 pub enum KittyImageFormat {
     Rgb,
     Rgba,

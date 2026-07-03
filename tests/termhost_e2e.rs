@@ -12,7 +12,6 @@
 //! emulator, so this exercises create_pane -> input -> frame across the seam and
 //! the step-3 render path. `pane.read` for a termhost pane is served from the Go
 //! backend over the seam (request_text), so it returns the program's output too.
-#![cfg(feature = "termhost")]
 
 mod support;
 

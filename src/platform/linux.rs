@@ -87,11 +87,6 @@ pub fn foreground_process_group_id(child_pid: u32) -> Option<u32> {
     (tpgid > 0).then_some(tpgid as u32)
 }
 
-pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
-    let pgid = unsafe { libc::tcgetpgrp(fd) };
-    (pgid > 0).then_some(pgid as u32)
-}
-
 fn process_pgrp_and_comm(pid: u32) -> Option<(i32, String)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;

@@ -430,6 +430,8 @@ impl TermhostClient {
     /// Atomically claims a surviving pane for adoption. Returns true exactly
     /// once per pane ID; later spawns with the same ID (shell respawn after
     /// the adopted process exited) create a fresh daemon pane instead.
+    // Caller is the real spawn tail, cfg'd out of test builds.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn claim_surviving_pane(&self, pane_id: u32) -> bool {
         let mut unclaimed = self.unclaimed_surviving.lock().unwrap();
         match unclaimed.iter().position(|id| *id == pane_id) {
@@ -729,10 +731,6 @@ impl TerminalBackend for TermhostPane {
             cell_width_px,
             cell_height_px,
         });
-    }
-
-    fn latest_frame(&self) -> Option<wire::FrameData> {
-        self.snapshot()
     }
 
     fn exit_status(&self) -> Option<i32> {

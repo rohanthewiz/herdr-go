@@ -1,6 +1,5 @@
 use std::ffi::OsStr;
 use std::io::Write;
-use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -358,11 +357,6 @@ pub fn foreground_process_group_id(pid: u32) -> Option<u32> {
     } else {
         None
     }
-}
-
-pub fn foreground_process_group_id_for_tty_fd(fd: RawFd) -> Option<u32> {
-    let pgid = unsafe { libc::tcgetpgrp(fd) };
-    (pgid > 0).then_some(pgid as u32)
 }
 
 /// Get the effective process name from `argv[0]` via `sysctl(KERN_PROCARGS2)`.

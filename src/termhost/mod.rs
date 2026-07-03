@@ -7,7 +7,6 @@
 //!
 //! See ai_docs/phase-b-orchestration-seam.md (in the herdr-web repo) for the
 //! protocol design.
-#![allow(dead_code, unused_imports)] // wired into PaneRuntime in the next integration step
 
 mod client;
 mod proto;
@@ -15,7 +14,6 @@ mod proto;
 pub use client::{PaneInputModes, PaneSignal, PaneSpec, SignalSink, TermhostClient, TermhostPane};
 pub use proto::{TEXT_SCOPE_RECENT, TEXT_SCOPE_VISIBLE};
 
-use crate::protocol as wire;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -64,6 +62,10 @@ struct SpawnedDaemon {
 /// An unreachable/undiscoverable daemon is a **hard error** (WS0 stage A
 /// decision): termhost is the only backend, and there is nothing to fall back
 /// to since the in-process emulator was deleted (WS0 stage C).
+// In test builds the only caller (the real spawn tail in pane.rs) is cfg'd
+// out; this roots the whole connect/spawn/discovery chain for dead-code
+// analysis there.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn required_client() -> std::io::Result<Arc<TermhostClient>> {
     match CLIENT.get_or_init(connect_backend).clone() {
         Some(client) => Ok(client),
@@ -319,9 +321,6 @@ pub trait TerminalBackend: Send + Sync {
 
     /// Resizes the pane's PTY and emulator.
     fn resize(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32);
-
-    /// Returns the latest rendered grid for the pane, if one is available.
-    fn latest_frame(&self) -> Option<wire::FrameData>;
 
     /// Returns the child process exit code once it has exited.
     fn exit_status(&self) -> Option<i32>;

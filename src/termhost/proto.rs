@@ -131,6 +131,8 @@ fn is_zero(n: &u32) -> bool {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Welcome {
+        // Carried on the wire; version negotiation is the daemon's job.
+        #[allow(dead_code)]
         protocol_version: i32,
         #[serde(default)]
         error: String,
@@ -236,6 +238,9 @@ pub enum Event {
 pub struct Frame {
     pub cols: u16,
     pub rows: u16,
+    // Carried on the wire; the client doesn't branch on it (full frames
+    // simply never set `skip`, so the fold is uniform).
+    #[allow(dead_code)]
     pub full: bool,
     pub cursor: Option<wire::CursorState>,
     pub cells: Vec<wire::CellData>,
@@ -259,6 +264,9 @@ pub struct FrameScroll {
 impl Frame {
     /// Converts into herdr's render frame. Graphics are not carried by the seam yet
     /// (reserved); hyperlinks are carried as of OSC 8 passthrough.
+    // Exercised by proto/grid tests; the client folds frames into PaneGrid
+    // and snapshots from there instead.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn into_frame_data(self) -> wire::FrameData {
         wire::FrameData {
             cells: self.cells,

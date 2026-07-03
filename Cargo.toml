@@ -11,15 +11,6 @@ keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
 include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
 
-[features]
-# Phase C (WS0): the Go terminal backend (src/termhost) is the default — panes
-# run in the Go `termhost` daemon, and an unreachable daemon is a hard error
-# (HERDR_TERMHOST_INPROCESS=1 is the transitional escape hatch). Build with
-# `--no-default-features` for the legacy in-process-only binary while the
-# in-process PTY+ghostty path still exists (removed in WS0 stages C/D).
-default = ["termhost"]
-termhost = []
-
 [dependencies]
 base64 = "0.22.1"
 bincode = { version = "2", features = ["serde"] }
@@ -28,7 +19,6 @@ crossterm = "0.29"
 ctrlc = "3"
 interprocess = "2.4.2"
 libc = "0.2"
-portable-pty = "0.9"
 png = "0.17"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 regex = "1"
@@ -40,6 +30,11 @@ toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
+
+[dev-dependencies]
+# Tests drive herdr and fake agents under real PTYs; the product itself no
+# longer opens PTYs (the Go termhost daemon owns them since WS0 stages C/D).
+portable-pty = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
