@@ -81,6 +81,11 @@ pub fn cleanup_test_base(base: &Path) {
     let runtime_dirs = HashSet::from([runtime_dir.clone()]);
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
+    // On macOS the runtime-dir sweep above is a no-op (no `/proc`); scope by the
+    // whole base dir instead so the live-handoff replacement server and the Go
+    // termhost daemon it holds open both get reaped before we unlink their files.
+    #[cfg(target_os = "macos")]
+    terminate_test_processes_under_base(base);
     unregister_runtime_dir(&runtime_dir);
     let _ = fs::remove_dir_all(base);
 }
@@ -386,6 +391,16 @@ pub fn cleanup_registered_herdr_pids() {
     };
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
+    // The whole test binary is going down (panic/ctrlc/atexit): unconditionally
+    // reap every backend under each drained test base on macOS, where the sweep
+    // above finds nothing. `runtime_dirs` was just drained, so the follow-up
+    // missing-runtime-dir pass sees an empty registry — handle these here.
+    #[cfg(target_os = "macos")]
+    for runtime_dir in &runtime_dirs {
+        if let Some(base) = runtime_dir.parent() {
+            terminate_test_processes_under_base(base);
+        }
+    }
     let _ = cleanup_servers_with_missing_runtime_dir();
 }
 
@@ -469,17 +484,37 @@ fn cleanup_servers_with_missing_runtime_dir() -> std::io::Result<()> {
         return Ok(());
     }
 
-    for pid in iter_worktree_server_pids()? {
-        let Some(runtime_dir) = process_runtime_dir(pid)? else {
-            continue;
-        };
-
-        if should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs) {
-            terminate_pid(pid);
+    // macOS can't map a pid to its runtime dir (no `/proc`, no readable env), so
+    // invert the scan: for each registered runtime dir whose owning test process
+    // has died (or whose dir has vanished), reap any backend still holding files
+    // under that test's base. A live test's own dir is skipped (owner alive), so
+    // this never kills an in-flight test's server.
+    #[cfg(target_os = "macos")]
+    {
+        for runtime_dir in &registered_runtime_dirs {
+            if should_terminate_runtime_dir(runtime_dir, &registered_runtime_dirs) {
+                if let Some(base) = runtime_dir.parent() {
+                    terminate_test_processes_under_base(base);
+                }
+            }
         }
+        return Ok(());
     }
 
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    {
+        for pid in iter_worktree_server_pids()? {
+            let Some(runtime_dir) = process_runtime_dir(pid)? else {
+                continue;
+            };
+
+            if should_terminate_runtime_dir(&runtime_dir, &registered_runtime_dirs) {
+                terminate_pid(pid);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn terminate_servers_for_runtime_dirs(runtime_dirs: &HashSet<PathBuf>) {
@@ -687,6 +722,110 @@ fn process_exists(pid: libc::pid_t) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+// macOS has no `/proc`, and SIP blocks reading another process's environment (so
+// `ps -E` and the Linux env-based `process_runtime_dir` are both unavailable).
+// We instead enumerate candidate backend processes with `ps` and scope each to a
+// test by checking, via `lsof`, whether it holds an open file/socket under the
+// test's base directory. This is what catches the live-handoff *replacement*
+// server: it re-execs `current_exe` with a `server` argv and is never registered
+// with `register_spawned_herdr_pid`, so on macOS nothing else reaps it — and while
+// it stays attached the Go termhost daemon's idle reaper never fires.
+#[cfg(target_os = "macos")]
+fn terminate_test_processes_under_base(base: &Path) {
+    let prefixes = base_match_prefixes(base);
+    let own_pid = std::process::id();
+    for (pid, command) in ps_pid_command_pairs() {
+        if pid == own_pid {
+            continue;
+        }
+        if !command_is_test_backend(&command) {
+            continue;
+        }
+        if pid_has_open_path_under(pid, &prefixes) {
+            terminate_pid(pid);
+        }
+    }
+}
+
+// `lsof` canonicalizes paths (e.g. reports `/tmp/...` as `/private/tmp/...`), so
+// match both the raw base and its canonical form.
+#[cfg(target_os = "macos")]
+fn base_match_prefixes(base: &Path) -> Vec<String> {
+    let mut prefixes = vec![base.to_string_lossy().into_owned()];
+    if let Ok(canonical) = base.canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if !prefixes.contains(&canonical) {
+            prefixes.push(canonical);
+        }
+    }
+    prefixes
+}
+
+#[cfg(target_os = "macos")]
+fn ps_pid_command_pairs() -> Vec<(u32, String)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(char::is_whitespace)?;
+            Some((pid.parse::<u32>().ok()?, command.trim().to_string()))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn command_is_test_backend(command: &str) -> bool {
+    command_is_test_herdr_server(command) || command_is_test_termhost_daemon(command)
+}
+
+#[cfg(target_os = "macos")]
+fn command_is_test_herdr_server(command: &str) -> bool {
+    let mut tokens = command.split_whitespace();
+    let Some(exe) = tokens.next() else {
+        return false;
+    };
+    is_test_herdr_binary(Path::new(exe)) && tokens.any(|arg| arg == "server")
+}
+
+#[cfg(target_os = "macos")]
+fn command_is_test_termhost_daemon(command: &str) -> bool {
+    let mut tokens = command.split_whitespace();
+    let Some(exe) = tokens.next() else {
+        return false;
+    };
+    let name = Path::new(exe)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    // Base-dir scoping (the caller's `lsof` check) is what proves ownership; here
+    // we only recognize the daemon binary and require its persistent flag so an
+    // unrelated process can never match.
+    matches!(name, "termhost" | "herdr-termhost") && tokens.any(|arg| arg == "--persistent")
+}
+
+#[cfg(target_os = "macos")]
+fn pid_has_open_path_under(pid: u32, prefixes: &[String]) -> bool {
+    let Ok(output) = std::process::Command::new("lsof")
+        .args(["-w", "-p", &pid.to_string(), "-Fn"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|path| {
+            prefixes
+                .iter()
+                .any(|prefix| path == prefix || path.starts_with(&format!("{prefix}/")))
+        })
 }
 
 
